@@ -1,0 +1,659 @@
+name: iOS Build on macOS Runner
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:            # doc-only pushes don't burn macOS minutes
+      - "**.md"
+      - ".gitignore"
+  workflow_dispatch:
+
+concurrency:                 # a newer push cancels the older running build
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+
+      # =========================================================
+      # 1. CHECKOUT
+      # =========================================================
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # =========================================================
+      # 2. GENERATE BUILD INFO (so every binary can be identified —
+      #    prints the exact commit SHA in the on-device debug log)
+      # =========================================================
+      - name: Generate Build Info
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "GENERATING BUILD INFO"
+          echo "=========================================="
+
+          BUILD_SHA="${GITHUB_SHA:0:7}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          {
+            echo "#pragma once"
+            echo "#define SANTA_BUILD_SHA \"${BUILD_SHA}\""
+            echo "#define SANTA_BUILD_TIME \"${BUILD_TIME}\""
+          } > ios/BuildInfo.h
+
+          echo "Build SHA:  ${BUILD_SHA}"
+          echo "Build Time: ${BUILD_TIME}"
+          cat ios/BuildInfo.h
+
+      # =========================================================
+      # 3. CHECK PROJECT
+      # =========================================================
+      - name: Check Project Files
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "PROJECT CHECK"
+          echo "=========================================="
+
+          pwd
+          ls -la
+
+          echo ""
+          echo "Checking project.yml..."
+
+          if [ ! -f "project.yml" ]; then
+            echo "ERROR: project.yml not found."
+            exit 1
+          fi
+
+          echo "project.yml found."
+
+          echo ""
+          echo "Checking xmas.xpk..."
+
+          if [ ! -f "assets/xmas.xpk" ]; then
+            echo "ERROR: assets/xmas.xpk NOT FOUND."
+            echo ""
+            echo "Assets directory:"
+            ls -lah assets 2>/dev/null || true
+            exit 1
+          fi
+
+          echo ""
+          echo "SUCCESS: xmas.xpk found."
+
+          ls -lh "assets/xmas.xpk"
+          du -h "assets/xmas.xpk"
+
+      # =========================================================
+      # 3. CHECK SOURCE
+      # =========================================================
+      - name: Check Source Files
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "SOURCE FILES"
+          echo "=========================================="
+
+          find ios src -maxdepth 3 -type f -print | sort
+
+      # =========================================================
+      # 4. COMPILE DESKTOP TEST
+      # =========================================================
+      - name: Compile C++ Test
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "C++ TEST BUILD"
+          echo "=========================================="
+
+          clang++ \
+            -std=c++17 \
+            -o engine_test \
+            src/main.cpp \
+            src/AssetManager.cpp \
+            src/XFileParser.cpp \
+            -lz
+
+          echo ""
+          echo "C++ test compiled successfully."
+
+          echo ""
+          echo "=========================================="
+          echo "RUNNING C++ TEST"
+          echo "=========================================="
+
+          ./engine_test || true
+
+      # =========================================================
+      # 4b. VERIFY GAME DATA (real xmas.xpk against the parsers)
+      #     catalog meshes, all level objects, all textures decode
+      # =========================================================
+      - name: Verify Game Data
+        run: |
+          set -e
+
+          clang++ \
+            -std=c++17 \
+            -Isrc \
+            -o verify_assets \
+            tools/verify_assets.cpp \
+            src/AssetManager.cpp \
+            src/TextureLoader.cpp \
+            src/ElementCatalog.cpp \
+            src/LevelParser.cpp \
+            src/AniParser.cpp \
+            src/XFileParser.cpp \
+            -lz
+
+          ./verify_assets assets/xmas.xpk
+
+      # =========================================================
+      # 4c. METAL TOOLCHAIN (only needed on newer Xcode images;
+      #     harmless / ignored on older ones)
+      # =========================================================
+      - name: Metal Toolchain
+        continue-on-error: true
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      # =========================================================
+      # 5. INSTALL XCODEGEN
+      # =========================================================
+      - name: Install XcodeGen
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "INSTALLING XCODEGEN"
+          echo "=========================================="
+
+          if command -v xcodegen >/dev/null 2>&1; then
+            echo "XcodeGen already installed."
+          else
+            brew install xcodegen
+          fi
+
+          xcodegen --version
+
+      # =========================================================
+      # 6. GENERATE XCODE PROJECT
+      # =========================================================
+      - name: Generate Xcode Project
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "GENERATING XCODE PROJECT"
+          echo "=========================================="
+
+          rm -rf SantaEngine.xcodeproj
+
+          xcodegen generate
+
+          if [ ! -d "SantaEngine.xcodeproj" ]; then
+            echo "ERROR: SantaEngine.xcodeproj was not generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "Xcode project generated successfully."
+
+      # =========================================================
+      # 7. BUILD IOS APP
+      # =========================================================
+      - name: Build iOS App
+        run: |
+          set -eo pipefail
+
+          echo "=========================================="
+          echo "BUILDING IOS APP"
+          echo "=========================================="
+
+          rm -rf build
+
+          xcodebuild \
+            -project SantaEngine.xcodeproj \
+            -scheme SantaEngine \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            ONLY_ACTIVE_ARCH=NO 2>&1 | tee xcodebuild.log
+
+          echo ""
+          echo "iOS build completed successfully."
+
+      # =========================================================
+      # 7b. ON FAILURE: show the compiler errors right in the log
+      # =========================================================
+      - name: Show Build Errors
+        if: failure()
+        run: |
+          echo "=========== error lines ==========="
+          grep -E "error:|fatal error:|Undefined symbols|ld: " xcodebuild.log | head -60 || true
+          echo "=========== last 40 lines ==========="
+          tail -40 xcodebuild.log || true
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # =========================================================
+      # 8. FIND APP
+      # =========================================================
+      - name: Locate Built App
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "LOCATING SANTAENGINE.APP"
+          echo "=========================================="
+
+          find build \
+            -type d \
+            -name "SantaEngine.app" \
+            -print
+
+          APP_PATH="$(find build -type d -name "SantaEngine.app" | head -n 1)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo ""
+            echo "ERROR: SantaEngine.app was not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "APP FOUND:"
+          echo "$APP_PATH"
+
+          echo "$APP_PATH" > app_path.txt
+
+          echo ""
+          echo "APP SIZE:"
+          du -sh "$APP_PATH"
+
+      # =========================================================
+      # 9. VERIFY EXECUTABLE
+      # =========================================================
+      - name: Verify App Executable
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "VERIFYING EXECUTABLE"
+          echo "=========================================="
+
+          if [ ! -f "$APP_PATH/SantaEngine" ]; then
+            echo "ERROR: SantaEngine executable is missing."
+            exit 1
+          fi
+
+          echo "Executable found:"
+          ls -lh "$APP_PATH/SantaEngine"
+
+          echo ""
+          echo "File type:"
+          file "$APP_PATH/SantaEngine"
+
+      # =========================================================
+      # 10. VERIFY INFO.PLIST
+      # =========================================================
+      - name: Verify Info Plist
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "VERIFYING INFO.PLIST"
+          echo "=========================================="
+
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "ERROR: Info.plist is missing."
+            exit 1
+          fi
+
+          echo "Info.plist found."
+          ls -lh "$APP_PATH/Info.plist"
+
+      # =========================================================
+      # 11. COPY GAME DATA INTO APP
+      # =========================================================
+      - name: Copy Game Data Into App
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "COPYING XMAS.XPK INTO APP"
+          echo "=========================================="
+
+          if [ ! -f "assets/xmas.xpk" ]; then
+            echo "ERROR: Source assets/xmas.xpk does not exist."
+            exit 1
+          fi
+
+          echo ""
+          echo "Source XPK:"
+          ls -lh "assets/xmas.xpk"
+
+          echo ""
+          echo "Destination:"
+          echo "$APP_PATH/xmas.xpk"
+
+          cp "assets/xmas.xpk" "$APP_PATH/xmas.xpk"
+
+          echo ""
+          echo "XPK copied successfully."
+
+          ls -lh "$APP_PATH/xmas.xpk"
+
+      # =========================================================
+      # 12. VERIFY GAME DATA INSIDE APP
+      # =========================================================
+      - name: Verify Game Data Inside App
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "VERIFYING GAME DATA INSIDE APP"
+          echo "=========================================="
+
+          echo ""
+          echo "APP CONTENTS:"
+          ls -lah "$APP_PATH"
+
+          echo ""
+          echo "SEARCHING FOR XPK:"
+          find "$APP_PATH" -type f -iname "*.xpk" -print
+
+          echo ""
+          echo "CHECKING xmas.xpk..."
+
+          if [ ! -f "$APP_PATH/xmas.xpk" ]; then
+            echo "ERROR: xmas.xpk is NOT inside SantaEngine.app."
+            exit 1
+          fi
+
+          echo ""
+          echo "SUCCESS: xmas.xpk is inside SantaEngine.app."
+
+          echo ""
+          echo "XPK SIZE:"
+          ls -lh "$APP_PATH/xmas.xpk"
+          du -h "$APP_PATH/xmas.xpk"
+
+      # =========================================================
+      # 13. VERIFY XPK SOURCE AND APP SIZE
+      # =========================================================
+      - name: Compare XPK Source And App
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "COMPARING XPK"
+          echo "=========================================="
+
+          SOURCE_SIZE=$(stat -f%z "assets/xmas.xpk")
+          APP_SIZE=$(stat -f%z "$APP_PATH/xmas.xpk")
+
+          echo "Source XPK: ${SOURCE_SIZE} bytes"
+          echo "App XPK:    ${APP_SIZE} bytes"
+
+          if [ "$SOURCE_SIZE" -ne "$APP_SIZE" ]; then
+            echo "ERROR: XPK size changed during copy."
+            exit 1
+          fi
+
+          echo ""
+          echo "SUCCESS: XPK copied correctly."
+
+      # =========================================================
+      # 14. SHOW FINAL APP
+      # =========================================================
+      - name: Show Final App
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "FINAL SANTAENGINE.APP"
+          echo "=========================================="
+
+          echo ""
+          echo "Total APP size:"
+          du -sh "$APP_PATH"
+
+          echo ""
+          echo "APP CONTENTS:"
+          find "$APP_PATH" -maxdepth 2 -type f -print | sort
+
+          echo ""
+          echo "XPK:"
+          ls -lh "$APP_PATH/xmas.xpk"
+
+      # =========================================================
+      # 15. CREATE PAYLOAD
+      # =========================================================
+      - name: Create IPA Payload
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo "=========================================="
+          echo "CREATING PAYLOAD"
+          echo "=========================================="
+
+          rm -rf Payload
+          rm -f SantaEngine.ipa
+
+          mkdir -p Payload
+
+          cp -R "$APP_PATH" "Payload/SantaEngine.app"
+
+          echo ""
+          echo "Payload created."
+
+          ls -lah Payload
+
+      # =========================================================
+      # 16. VERIFY PAYLOAD
+      # =========================================================
+      - name: Verify IPA Payload
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "VERIFYING PAYLOAD"
+          echo "=========================================="
+
+          if [ ! -d "Payload/SantaEngine.app" ]; then
+            echo "ERROR: Payload/SantaEngine.app missing."
+            exit 1
+          fi
+
+          if [ ! -f "Payload/SantaEngine.app/SantaEngine" ]; then
+            echo "ERROR: SantaEngine executable missing."
+            exit 1
+          fi
+
+          if [ ! -f "Payload/SantaEngine.app/Info.plist" ]; then
+            echo "ERROR: Info.plist missing."
+            exit 1
+          fi
+
+          if [ ! -f "Payload/SantaEngine.app/xmas.xpk" ]; then
+            echo "ERROR: xmas.xpk missing from Payload."
+            exit 1
+          fi
+
+          echo ""
+          echo "SUCCESS: Payload contains all required files."
+
+          echo ""
+          echo "Payload size:"
+          du -sh Payload
+
+          echo ""
+          echo "Payload XPK:"
+          ls -lh "Payload/SantaEngine.app/xmas.xpk"
+
+      # =========================================================
+      # 17. CREATE IPA
+      # =========================================================
+      - name: Package IPA
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "CREATING SANTAENGINE.IPA"
+          echo "=========================================="
+
+          rm -f SantaEngine.ipa
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            Payload \
+            SantaEngine.ipa
+
+          if [ ! -f "SantaEngine.ipa" ]; then
+            echo "ERROR: SantaEngine.ipa was not created."
+            exit 1
+          fi
+
+          echo ""
+          echo "IPA CREATED:"
+          ls -lh SantaEngine.ipa
+
+          IPA_BYTES=$(stat -f%z SantaEngine.ipa)
+
+          echo ""
+          echo "IPA SIZE:"
+          echo "${IPA_BYTES} bytes"
+
+          if [ "$IPA_BYTES" -lt 102400 ]; then
+            echo ""
+            echo "ERROR: IPA is suspiciously small."
+            exit 1
+          fi
+
+          echo ""
+          echo "IPA size check passed."
+
+      # =========================================================
+      # 18. VERIFY FINAL IPA
+      # =========================================================
+      - name: Verify Final IPA Contents
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "VERIFYING FINAL IPA"
+          echo "=========================================="
+
+          echo ""
+          echo "IPA CONTENTS:"
+          unzip -l SantaEngine.ipa
+
+          echo ""
+          echo "Checking executable..."
+
+          if unzip -l SantaEngine.ipa | grep -q "Payload/SantaEngine.app/SantaEngine"; then
+            echo "SUCCESS: SantaEngine executable found."
+          else
+            echo "ERROR: SantaEngine executable missing."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking xmas.xpk..."
+
+          if unzip -l SantaEngine.ipa | grep -q "Payload/SantaEngine.app/xmas.xpk"; then
+            echo "SUCCESS: xmas.xpk found inside IPA."
+          else
+            echo "ERROR: xmas.xpk NOT found inside IPA."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking Info.plist..."
+
+          if unzip -l SantaEngine.ipa | grep -q "Payload/SantaEngine.app/Info.plist"; then
+            echo "SUCCESS: Info.plist found."
+          else
+            echo "ERROR: Info.plist missing."
+            exit 1
+          fi
+
+      # =========================================================
+      # 19. FINAL REPORT
+      # =========================================================
+      - name: Final Build Report
+        run: |
+          set -e
+
+          APP_PATH="$(cat app_path.txt)"
+
+          echo ""
+          echo "================================================"
+          echo "          SANTAENGINE IOS BUILD REPORT"
+          echo "================================================"
+
+          echo ""
+          echo "APP SIZE:"
+          du -sh "$APP_PATH"
+
+          echo ""
+          echo "EXECUTABLE:"
+          ls -lh "$APP_PATH/SantaEngine"
+
+          echo ""
+          echo "GAME DATA:"
+          ls -lh "$APP_PATH/xmas.xpk"
+
+          echo ""
+          echo "IPA:"
+          ls -lh SantaEngine.ipa
+
+          echo ""
+          echo "================================================"
+          echo "       BUILD + GAME DATA + IPA OK"
+          echo "================================================"
+
+      # =========================================================
+      # 20. UPLOAD IPA
+      # =========================================================
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SantaEngine-IPA
+          path: SantaEngine.ipa
+          if-no-files-found: error
+          retention-days: 7
