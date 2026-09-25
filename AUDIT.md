@@ -1,0 +1,56 @@
+# Santa iOS Engine — full audit (Metal conversion)
+
+Everything below was checked against the real `assets/xmas.xpk` (177 files).
+"Verified" = run/rendered on real data. The Objective‑C++/Metal changes could not be
+compiled in the audit sandbox (no Apple toolchain) — let CI compile them and read the log.
+
+## Archive facts
+- XPK table: `count, nameOffsets[], namesLen, names, totalSize, sizes[], fileTime[] (unix, Sep–Nov 2002), dataOffset[] (absolute)`.
+- 88 `.x` (all MSZIP, all parse), 22 `.dds`, 4 `.tga`, 4 `.jpg`, 13 `.dat` levels, 5 `.ani` (raw), 15 `.wav`, 10 `.lib`, `sfx.txt`, `data/elements.txt`, fonts/gui/effects `.txt`.
+- Levels: 13 files, 6313 objects, 60‑byte records, every name exists in `elements.txt` (101 elements).
+- Textures: RGB565, ARGB4444, ARGB1555, ARGB8888, **P8 (himmel)**, TGA32. No DXT.
+
+## Bugs found and fixed
+| # | Area | Problem | Fix |
+|---|------|---------|-----|
+| 1 | Shaders.metal | `sprite_vertex`/`sprite_fragment` missing → nil sprite pipeline | added; MetalView guards nil |
+| 2 | Shaders.metal | position written straight to clip space, z∈[-0.7,0.7] → Metal clips z<0 (half the model) | real MVP matrix |
+| 3 | MetalView | UV `1 - v` flip scrambles texture (D3D and Metal both V=0 top) | removed |
+| 4 | Camera | right‑handed + GL depth [-1,1] vs D3D data | left‑handed + [0,1] |
+| 5 | MetalView | no winding/cull state | clockwise front + back cull (verified 0.0 % vs 78.7 %) |
+| 6 | AssetManager | case‑sensitive lookups: 24/101 catalog files not found | case/slash‑insensitive, uses stored offsets |
+| 7 | Catalog | enemy `FILE` is `.ani`; mesh is same‑named `.x` | `ElementCatalog` + GameEngine map `.ani→.x` |
+| 8 | LevelParser | `getEntityType` guessed from name substrings (PRESENT/EXTRA LIFE/SAVEPOINT/EXIT/… wrong) | uses `elements.txt` TYPE (0 unknown of 6313) |
+| 9 | TextureLoader | no P8 (sky) / TGA (gui2, gui_small, mouse); `dach.jpg`, `objects_old.jpg` unresolved | added + aliases |
+| 10 | FontRenderer | glyph metrics in em (52 px) mixed with 24 px; one triangle strip for whole string; V swapped | em‑correct metrics, triangle list, no swap |
+| 11 | AniParser/AnimationSystem | `.ani` is raw, was fed to MSZIP → 0 bytes | passthrough; format notes in `AniParser.h` |
+| 12 | GameEngine | repo copy older than local (no skinning / catalog / face header) | merged newer version |
+| 13 | Info.plist | portrait only (game is 800×600 landscape) | landscape, fullscreen, `metal` capability |
+| 14 | project.yml | ARC implicit, music not bundled, Info.plist in sources | explicit ARC, `assets/music` resource, exclude Info.plist |
+| 15 | Button.mm | parameter named `id` | renamed |
+| 16 | MetalView | ivar assigned before `[super init]` | fixed |
+
+## Found on device (2026-09-21 screen recording)
+- Level 000 renders (460 objects, 30 models) but every model was WHITE: `GameEngine.mm` never found the texture name
+  because the `MeshTextureCoords` handler leaves the brace depth unbalanced and the `Mesh` scan ends early
+  (TextureFilename and SkinWeights come after it). Fixed with a file-wide `TextureFilename` fallback
+  (verified on all 88 `.x`: every one resolves; only `qmeter.x` points to a texture that is not in the archive).
+- Same bug is why the skin counter always showed `0SK`. With the scan fixed the skin blocks parse (Santa 47, troll 28, raven 28,
+  snowman 7, 0 missing bones) but the current skinning math distorts the model, so it is intentionally still off.
+
+## Frame transforms (2026-09-21)
+- 59 of 88 `.x` files have a non-identity world matrix above their `Mesh` (pivot offsets, some 90°/180° rotations).
+  Evidence they must be applied: Santa +63.07 y == the OBJ reference pose; wall_*/snow_* tops land on y=0 like the
+  platt_* pieces; trees/hills get their base on y=0 (level y values are integers); troll/snowman feet on y=0.
+- Implemented in `GameEngine.mm` (`meshWorldByToken`), verified with an offline render of level 000.
+
+## PC reference video (2026-09-21)
+- Level 000 has 80 presents == HUD `x/80` of LEVEL 1; level 001 has 96 == `0/96` of LEVEL 2 (details in `docs/PC_REFERENCE.md`).
+- Sky is the `himmel.x` cylinder (not a flat backdrop); PC background below it is pure black. Implemented.
+
+## Known gaps (not done)
+- `.ani` keyframes: 80‑byte records (4×4 matrix, 3 floats ≈ scale, u32 ms time, step 160) recognised, but clip/bone boundaries not decoded → no animation playback yet.
+- `qmeter.jpg` texture referenced by `qmeter.x` does not exist in the archive (falls back to white).
+- Music `m02B.wav` lives outside the XPK; other tracks are not in the provided data.
+- Skinning pose accuracy on device is unverified (bind‑pose rendering verified).
+- Repo contains original game files (`xmas.xpk`, exe, docs): keep it **private**.
