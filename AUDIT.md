@@ -48,6 +48,35 @@ compiled in the audit sandbox (no Apple toolchain) — let CI compile them and r
 - Level 000 has 80 presents == HUD `x/80` of LEVEL 1; level 001 has 96 == `0/96` of LEVEL 2 (details in `docs/PC_REFERENCE.md`).
 - Sky is the `himmel.x` cylinder (not a flat backdrop); PC background below it is pure black. Implemented.
 
+## Skinning investigation (2026-09-26, tools/test_skin.cpp)
+Built a standalone harness (`tools/test_skin.cpp`, no Xcode needed) that runs the exact mesh+skin
+extraction logic from `GameEngine.mm` directly against the real `assets/xmas.xpk` and measures
+results numerically instead of guessing from a screenshot.
+
+- Confirmed a second, distinct bug beyond the MeshTextureCoords one (now fixed): `pendingFrame`
+  in the Pass-1 frame-hierarchy walk isn't reset when a non-NAME token follows "Frame" before its
+  name, so it can attach a bone-hierarchy transform to the wrong token later in the file (only
+  cosmetic impact observed so far — one bogus map entry named "FrameTransformMatrix" — but should
+  be fixed for correctness).
+- Reproduced the documented "Santa 129→202" distortion exactly: it comes from applying `meshWorld`
+  a second time on top of already-skinned vertices. Current code (no such double-apply) already
+  measures much closer: bind-pose height 129.4, current skinned height 139.1 (order = offset*boneWorld).
+- Tested 6 bone-matrix conventions (offset*boneWorld, boneWorld*offset, offset-only, boneWorld-only,
+  and transposed variants) against the real bind-pose bounding box. The current formula
+  (offset*boneWorld, row-vector convention) is the best of everything tried, but still ~8% too
+  tall and the per-vertex distance to the bind pose (which a correct rest-pose skin should
+  reproduce almost exactly) averages ~10.5 units on a 129-unit character — not yet correct.
+- **New finding, verified from raw tokens** (see a `SkinWeights` block for `Knochen_Mund3`):
+  every single skin block's trailing FLOAT array is exactly `vertexIndices.size() - 1 + 16`
+  floats long, i.e. one weight short of the `N weights + 16-float matrix` layout the code assumes
+  — universal across all 47 blocks checked on Santa's mesh (N=2 up to N=554), so it's a real
+  encoding quirk, not noise. Tried "trailing vertex gets implicit weight 1.0" as the fix — it does
+  **not** reduce the bind-pose error, so that hypothesis is wrong and the true meaning of the
+  missing float is still open.
+- **Conclusion: skinning is not yet safe to ship as-is.** Recommend leaving skinning off (current
+  README default) until this is resolved with an on-device visual A/B, since none of the formulas
+  tested here reproduce the bind pose closely enough to trust blind.
+
 ## Known gaps (not done)
 - `.ani` keyframes: 80‑byte records (4×4 matrix, 3 floats ≈ scale, u32 ms time, step 160) recognised, but clip/bone boundaries not decoded → no animation playback yet.
 - `qmeter.jpg` texture referenced by `qmeter.x` does not exist in the archive (falls back to white).

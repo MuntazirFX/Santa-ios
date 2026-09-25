@@ -155,6 +155,16 @@ struct SkinWeightsData {
                 pendingFrame = false;
                 continue;
             }
+            // BUG (fixed): if the token right after "Frame" isn't a NAME (type 1)
+            // — e.g. the template-declarations section's `template Frame { <guid> ... }`,
+            // where a brace comes next — `pendingFrame` stayed true and silently
+            // grabbed the NEXT unrelated NAME token anywhere later in the file
+            // (verified: it was mislabelling "FrameTransformMatrix" as a frame name
+            // on the real weihnachtsman_000.x). Any non-NAME token means this
+            // "Frame" wasn't followed by a name, so stop waiting for one.
+            if (pendingFrame && tok.type != 1) {
+                pendingFrame = false;
+            }
             if (tok.type == 10) {
                 if (!pendingFrameName.empty()) {
                     worldStack.push_back(worldStack.back());
