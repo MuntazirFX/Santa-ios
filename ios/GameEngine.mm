@@ -252,6 +252,17 @@ struct SkinWeightsData {
             }
             
             if (t.type == 1 && t.name == "MeshTextureCoords") {
+                // BUG (fixed): this used to `break` the inner loop the moment it
+                // found the FLOAT_LIST (type 7), setting j to that token's index
+                // WITHOUT ever consuming MeshTextureCoords' own closing brace.
+                // The very next token in the file is that closing "}" (type 11),
+                // which the OUTER loop then saw and mistook for the Mesh's own
+                // closing brace (outer `depth` was never incremented for this
+                // inner "{", so one "}" brought it straight to 0) — ending the
+                // Mesh scan right there. Anything that follows MeshTextureCoords
+                // in the file — crucially SkinWeights — was silently never seen
+                // for that mesh. Fix: keep scanning with d2/e2 all the way to
+                // MeshTextureCoords' matching "}" before resuming the outer scan.
                 int d2 = 0; bool e2 = false;
                 for (size_t k = j + 1; k < tokens.size(); k++) {
                     if (tokens[k].type == 10) { d2++; e2 = true; continue; }
@@ -260,7 +271,7 @@ struct SkinWeightsData {
                         if (e2 && d2 == 0) { j = k; break; }
                         continue;
                     }
-                    if (tokens[k].type == 7) { meshUVs = &tokens[k].floatList; j = k; break; }
+                    if (tokens[k].type == 7 && !meshUVs) { meshUVs = &tokens[k].floatList; }
                 }
                 continue;
             }
