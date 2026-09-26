@@ -14,6 +14,7 @@
 // reproduces the full render pixel-for-pixel. If a model ever disappears,
 // set this to NO to rule culling out.
 static const BOOL kCullBackFaces = YES;
+static const float kPi = 3.14159265358979f;
 
 // Left-handed rotation about Y (D3DXMatrixRotationY, written for column vectors).
 static simd_float4x4 RotationY(float a) {
@@ -215,6 +216,7 @@ static simd_float4x4 RotationY(float a) {
         _controlsEnabled = YES;
         _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = NO;
         _lastFrameTime = 0;
+        [_levelRenderer loadCharacterMesh:@"gfx\\weihnachtsman_000.x"];
     } else {
         _controlsEnabled = NO;
         _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = YES;
@@ -450,6 +452,27 @@ static simd_float4x4 RotationY(float a) {
                           _character.position.x, _character.position.y, _character.position.z,
                           stateName[_character.state], _character.isOnGround ? @"Y" : @"N"];
         if (![dbg isEqualToString:_displayText]) [self setTextToDisplay:dbg];
+
+        // Draw Santa in the level at the character's live position.
+        // NOTE (visual estimate, not a verified constant — see LevelRenderer.h
+        // loadCharacterMesh: comment): Santa isn't in data\elements.txt so
+        // there's no authored SCALING for him like level objects have; his
+        // raw mesh bind-pose is ~129 units tall (measured in tools/test_skin.cpp),
+        // so kCharacterScale below is picked to land him around ~2.5 world
+        // units tall next to the 3.0-unit level grid — tune this by eye once
+        // you can see him next to a platform.
+        static const float kCharacterScale = 0.02f;
+        float yaw = (_character.facingDirection < 0) ? kPi : 0.0f; // model faces +Z by convention; flip for left
+        float c = cosf(yaw) * kCharacterScale, s = sinf(yaw) * kCharacterScale;
+        simd_float4x4 charModel = matrix_identity_float4x4;
+        charModel.columns[0] = simd_make_float4(c, 0, -s, 0);
+        charModel.columns[1] = simd_make_float4(0, kCharacterScale, 0, 0);
+        charModel.columns[2] = simd_make_float4(s, 0, c, 0);
+        charModel.columns[3] = simd_make_float4(_character.position.x, _character.position.y, _character.position.z, 1.0f);
+        _levelRenderer.characterTransform = charModel;
+        _levelRenderer.hasCharacter = YES;
+    } else {
+        _levelRenderer.hasCharacter = NO;
     }
 
     // Model is normalised to ~1.4 units; pull the camera back until it fits

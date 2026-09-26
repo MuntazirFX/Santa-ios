@@ -63,6 +63,8 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
     float _yaw;
     float _pitch;
     NSUInteger _texMissing;   // unique textures that fell back to white
+
+    LevelGPUMesh *_characterMesh;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -243,6 +245,12 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
     return gm;
 }
 
+- (BOOL)loadCharacterMesh:(NSString *)file {
+    if (_characterMesh) return YES; // already loaded (cached — same as the level's own batches)
+    _characterMesh = [self buildGPUMeshForFile:file];
+    return _characterMesh != nil;
+}
+
 - (BOOL)loadLevel:(NSString *)levelPath {
     _hasLevel = NO;
     _objectCount = 0;
@@ -410,6 +418,19 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
                          indexBuffer:m.indexBuffer
                    indexBufferOffset:0];
         }
+    }
+
+    // Player character (Santa), drawn on top with a caller-supplied transform.
+    if (_hasCharacter && _characterMesh) {
+        simd_float4x4 model = _characterTransform;
+        [e setVertexBuffer:_characterMesh.vertexBuffer offset:0 atIndex:0];
+        [e setFragmentTexture:_characterMesh.texture atIndex:0];
+        [e setVertexBytes:&model length:sizeof(model) atIndex:2];
+        [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                      indexCount:_characterMesh.indexCount
+                       indexType:MTLIndexTypeUInt32
+                     indexBuffer:_characterMesh.indexBuffer
+               indexBufferOffset:0];
     }
 }
 

@@ -140,11 +140,25 @@ disassembler available in this sandbox) and against the real data via the existi
     (added a `radius` field to `LevelObject` + `elements.txt`'s `RADIUS` line, so it carries the
     same collision data end to end). Each frame, `drawInMTKView:` steps `CharacterController`
     against real ground height / enemy collision and shows live position + state on the existing
-    text overlay. **Still not done**: this proves the simulation is real and correct, but doesn't
-    yet draw a moving Santa mesh inside the level — `LevelRenderer.encodeInto:` only draws the
-    static placed objects today. Rendering an animated, moving character inside the level view is
-    the next real milestone (needs a second draw call in `encodeInto:`/`drawInMTKView:` for a
-    dynamic mesh at `_character.position`, plus `AnimationSystem` playback driving its pose).
+    text overlay.
+  - **Also done this session — Santa is now actually drawn moving in the level.**
+    `LevelRenderer` gained `loadCharacterMesh:` (loads `gfx\weihnachtsman_000.x` once, reusing
+    the exact same `buildGPUMeshForFile:` helper the static level objects use) and a
+    `characterTransform`/`hasCharacter` pair that `encodeInto:` draws on top of the level each
+    frame. `MetalView.mm` builds that transform from `_character.position` +
+    `facingDirection` every frame. **Caveat, stated plainly**: Santa isn't a `data\elements.txt`
+    catalog entry (he's spawned by code, not placed like level objects), so there's no authored
+    SCALING value to size him against the level grid the way every other object has. The scale
+    constant (`kCharacterScale = 0.02`, chosen from the ~129-unit bind-pose height measured in
+    `tools/test_skin.cpp` to land him around ~2.5 world units tall next to the 3.0-unit grid) is
+    a **visual estimate that needs eyeballing on a real device/simulator**, not a verified number
+    like everything else in this file.
+  - **Still not done / known-broken on purpose**: he's drawn in his static bind pose — no walk
+    cycle. `AnimationSystem`/`AniParser` playback was deliberately **not** wired in yet, because
+    the skinning matrix math still has the ~8%-too-tall distortion documented above; turning on
+    animation now would drive that same broken skin math every frame and could look worse than
+    the static bind pose, not better. Fix the skinning bug first, then wire `AnimationSystem`
+    into this same `characterTransform` path.
 
 ## Windows DLL dependencies — exe import table (2026-09-26)
 

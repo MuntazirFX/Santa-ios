@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <UIKit/UIKit.h>
+#import <simd/simd.h>
 
 // ============================================================
 // LevelRenderer — draws a whole level (levels\NNN.dat) with Metal.
@@ -36,6 +37,17 @@
 - (void)encodeInto:(id<MTLRenderCommandEncoder>)encoder
         depthState:(id<MTLDepthStencilState>)depthState
       viewportSize:(CGSize)size;
+
+// The player character mesh (e.g. "gfx\\weihnachtsman_000.x"), drawn on top
+// of the static level batches each frame at `characterTransform`. Loads and
+// caches once; safe to call again with the same file. NOTE: Santa isn't a
+// data\elements.txt catalog entry (he's spawned by game code, not placed
+// like level objects), so there's no authored SCALING value for him — the
+// scale baked into `characterTransform` by the caller is a visual estimate,
+// not a verified constant like the level objects' own SCALING values are.
+- (BOOL)loadCharacterMesh:(NSString *)file;
+@property (nonatomic) BOOL hasCharacter;         // YES once loadCharacterMesh: succeeds and the caller wants it drawn
+@property (nonatomic) simd_float4x4 characterTransform;  // column-major model matrix, set every frame by the caller
 
 // Camera control (called from gesture recognizers)
 - (void)panByPixels:(CGPoint)delta viewHeight:(CGFloat)viewHeight;   // one finger drag
