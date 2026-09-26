@@ -1,4 +1,5 @@
 #import "CharacterController.h"
+#import "PhysicsWorld.h"
 
 @implementation CharacterController {
     BOOL _inputLeft;
@@ -18,6 +19,7 @@
         _walkSpeed = 4.0f;
         _jumpVelocity = 8.0f;
         _gravity = -20.0f;
+        _radius = 1.0f;
         
         _inputLeft = NO;
         _inputRight = NO;
@@ -67,9 +69,11 @@
     // Apply velocity
     _position += _velocity * deltaTime;
     
-    // Ground check (simple — replace with level collision later)
-    if (_position.y <= 0) {
-        _position.y = 0;
+    // Ground check — real level ground when a PhysicsWorld is attached
+    // (raycasts against PLATTFORM/RECTFORM objects), flat y=0 otherwise.
+    float ground = _physicsWorld ? [_physicsWorld groundHeightAtX:_position.x z:_position.z] : 0.0f;
+    if (_position.y <= ground) {
+        _position.y = ground;
         _velocity.y = 0;
         _isOnGround = YES;
         if (_state == CharacterStateJumping || _state == CharacterStateFalling) {
@@ -79,6 +83,14 @@
         _isOnGround = NO;
         if (_state != CharacterStateJumping) {
             _state = CharacterStateFalling;
+        }
+    }
+
+    // Enemy collision (only meaningful once physicsWorld is wired up by
+    // the caller with the current level's entities).
+    if (_physicsWorld && _state != CharacterStateHurt) {
+        if ([_physicsWorld checkCollisionAtPosition:_position radius:_radius]) {
+            _state = CharacterStateHurt;
         }
     }
 }

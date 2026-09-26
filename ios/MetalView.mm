@@ -3,8 +3,11 @@
 #import "FontRenderer.h"
 #import "Camera.h"
 #import "LevelRenderer.h"
+#import "PhysicsWorld.h"
+#import "CharacterController.h"
 #import <Metal/Metal.h>
 #import <simd/simd.h>
+#import <QuartzCore/QuartzCore.h>
 
 // Direct3D-style back-face culling (clockwise = front). Verified on the real
 // Santa mesh: with a left-handed camera, keeping only clockwise triangles
@@ -44,6 +47,15 @@ static simd_float4x4 RotationY(float a) {
 
     FontRenderer *_fontRenderer;
     NSString *_displayText;
+
+    // Gameplay — DINPUT8 replacement (on-screen touch controls) + real
+    // level collision, wired to the actual working level parser
+    // ([GameEngine parseLevelData:], same data LevelRenderer draws).
+    PhysicsWorld *_physicsWorld;
+    CharacterController *_character;
+    BOOL _controlsEnabled;
+    CFTimeInterval _lastFrameTime;
+    UIButton *_btnLeft, *_btnRight, *_btnJump;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -146,13 +158,68 @@ static simd_float4x4 RotationY(float a) {
         [self addGestureRecognizer:pan];
         [self addGestureRecognizer:pinch];
         [self addGestureRecognizer:twist];
+
+        // Gameplay: PhysicsWorld + CharacterController + on-screen buttons
+        // (DINPUT8 replacement — the exe read arrow keys/space here).
+        _physicsWorld = [[PhysicsWorld alloc] init];
+        _character = [[CharacterController alloc] init];
+        _character.physicsWorld = _physicsWorld;
+        _controlsEnabled = NO;
+        _lastFrameTime = 0;
+
+        CGFloat bs = 64, margin = 24, bottom = frame.size.height - 64 - margin;
+        _btnLeft = [self makeControlButton:@"◀" frame:CGRectMake(margin, bottom, bs, bs)];
+        _btnRight = [self makeControlButton:@"▶" frame:CGRectMake(margin + bs + 16, bottom, bs, bs)];
+        _btnJump = [self makeControlButton:@"▲" frame:CGRectMake(frame.size.width - bs - margin, bottom, bs, bs)];
+        [_btnLeft addTarget:self action:@selector(leftDown) forControlEvents:UIControlEventTouchDown];
+        [_btnLeft addTarget:self action:@selector(leftUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        [_btnRight addTarget:self action:@selector(rightDown) forControlEvents:UIControlEventTouchDown];
+        [_btnRight addTarget:self action:@selector(rightUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        [_btnJump addTarget:self action:@selector(jumpTapped) forControlEvents:UIControlEventTouchDown];
+        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = YES; // shown once a level with a playable character loads
+        [self addSubview:_btnLeft];
+        [self addSubview:_btnRight];
+        [self addSubview:_btnJump];
     }
     return self;
 }
 
+- (UIButton *)makeControlButton:(NSString *)title frame:(CGRect)frame {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = frame;
+    b.layer.cornerRadius = frame.size.width * 0.5;
+    b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:28];
+    return b;
+}
+
+- (void)leftDown  { [_character setInputLeft:YES]; }
+- (void)leftUp    { [_character setInputLeft:NO]; }
+- (void)rightDown { [_character setInputRight:YES]; }
+- (void)rightUp   { [_character setInputRight:NO]; }
+- (void)jumpTapped { [_character triggerJump]; }
+
 // ---------- level view ----------
 - (BOOL)loadLevel:(NSString *)levelPath {
-    return [_levelRenderer loadLevel:levelPath];
+    BOOL ok = [_levelRenderer loadLevel:levelPath];
+    if (ok) {
+        // Same parser LevelRenderer itself uses (GameEngine parseLevelData:) —
+        // gives PhysicsWorld the real per-object RADIUS/TYPE/position data.
+        NSArray<LevelObject *> *objs = [GameEngine parseLevelData:levelPath];
+        [_physicsWorld setEntitiesFromLevelObjects:objs];
+        _character.position = simd_make_float3(0, [_physicsWorld groundHeightAtX:0 z:0] + 0.01f, 0);
+        _character.velocity = simd_make_float3(0, 0, 0);
+        _character.state = CharacterStateIdle;
+        _controlsEnabled = YES;
+        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = NO;
+        _lastFrameTime = 0;
+    } else {
+        _controlsEnabled = NO;
+        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = YES;
+    }
+    return ok;
 }
 
 - (NSString *)levelSummary {
@@ -366,6 +433,24 @@ static simd_float4x4 RotationY(float a) {
 
     _frameCount++;
     _angle += 0.01f;
+
+    // Gameplay step — DINPUT8 replacement. Note: this drives the character's
+    // simulation state (position/velocity/state against real level ground +
+    // enemy collision) and shows it via the debug text overlay; it does not
+    // yet draw a moving Santa mesh inside the level view (LevelRenderer only
+    // draws the static placed objects today) — that's the next real step.
+    if (_controlsEnabled && levelMode) {
+        CFTimeInterval now = CACurrentMediaTime();
+        float dt = (_lastFrameTime > 0) ? (float)(now - _lastFrameTime) : 0.0f;
+        _lastFrameTime = now;
+        dt = fminf(dt, 0.1f); // clamp huge first-frame / stall deltas
+        [_character update:dt];
+        NSString *stateName[] = {@"Idle", @"Walking", @"Jumping", @"Falling", @"Hurt"};
+        NSString *dbg = [NSString stringWithFormat:@"Santa (%.1f, %.1f, %.1f)  %@  ground:%@",
+                          _character.position.x, _character.position.y, _character.position.z,
+                          stateName[_character.state], _character.isOnGround ? @"Y" : @"N"];
+        if (![dbg isEqualToString:_displayText]) [self setTextToDisplay:dbg];
+    }
 
     // Model is normalised to ~1.4 units; pull the camera back until it fits
     // both horizontally and vertically (landscape or portrait).

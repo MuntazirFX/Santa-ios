@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <simd/simd.h>
 
+@class PhysicsWorld;
+
 // ============================================================
 // Character Controller
 //
@@ -35,6 +37,12 @@ typedef NS_ENUM(NSInteger, CharacterState) {
 @property (nonatomic) float walkSpeed;      // default 4.0
 @property (nonatomic) float jumpVelocity;   // default 8.0
 @property (nonatomic) float gravity;        // default -20.0
+
+// Optional — when set, ground checks raycast against the level's own
+// PLATTFORM/RECTFORM objects (PhysicsWorld) instead of the flat y=0
+// plane, and character radius is checked against enemies each update.
+@property (nonatomic, weak) PhysicsWorld *physicsWorld;
+@property (nonatomic) float radius; // default 1.0, used against PhysicsWorld enemy collision
 
 // Input (set by UI, applied in update)
 - (void)setInputLeft:(BOOL)left;

@@ -77,6 +77,114 @@ results numerically instead of guessing from a screenshot.
   README default) until this is resolved with an on-device visual A/B, since none of the formulas
   tested here reproduce the bind pose closely enough to trust blind.
 
+## Session 2026-09-26 — exe forensics + collision implementation
+
+Re-checked the project against `SantaClausInTrouble.exe` itself (`strings` on the PE, no
+disassembler available in this sandbox) and against the real data via the existing
+`tools/test_skin.cpp` harness. Concrete outcomes:
+
+- **`pendingFrame` bug**: already fixed in the current `GameEngine.mm` (see the "BUG (fixed)"
+  comment at the Pass-1 frame walk). The AUDIT text above still described it as open from an
+  earlier state of the file — that description is now stale; the fix is confirmed present and
+  correct.
+- **Skinning float mystery — 4 more hypotheses tested and ruled out**, using
+  `tools/test_skin.cpp` against the real `gfx\weihnachtsman_000.x` (baseline bind-pose error:
+  mean 10.57 / rms 13.26 over 1624 verts):
+  - "last vertex weight = 1 − sum(others)" → 10.41 / 13.17 (no real change)
+  - "first vertex weight = 1 − sum(rest), shifted" → 10.55 / 13.34 (no change)
+  - "drop the extra trailing vertexIndex, weights already 1:1" → 10.57 / 13.26 (no change)
+  - "drop the extra leading vertexIndex" → 10.69 / 13.38 (slightly worse)
+  - New alternative theory — **also ruled out**: that the trailing "16 floats" is actually a
+    15-float affine matrix (implicit constant 1.0 at [3][3]) and the weights array is really
+    full-length (N, not N−1). Tested directly: bounding box exploded to ~49000 units (vs. the
+    real ~130-unit mesh), so the offset matrix genuinely is 16 explicit floats, not 15 — the
+    missing value is really a weight, not a matrix element.
+  - **Why this barely moves the aggregate error**: only 1 vertex per bone block is affected by
+    any of these fixes, so across 1624 vertices and 47 bone blocks the effect is far too small
+    to explain the ~8%-too-tall symptom. **The missing-weight reconstruction is very unlikely
+    to be the dominant bug** — the bone/offset-matrix combination order (already the most-tested
+    axis, per the "Skinning investigation" section above) remains the more likely root cause.
+  - Corroborating find: the exe embeds its D3D8 vertex shader source as plain-text comments
+    (`vs.1.1` blocks, `strings`-visible). They confirm the *runtime* per-vertex blend format
+    really does store only 3 of 4 bone weights explicitly and computes the 4th as
+    `1 − dot(others)` (`; first compute the last blending weight` / `dp3 r0.w,v1.xyz,c0.xzz` /
+    `add r0.w,-r0.w,c0.x`) — but this is the GPU's compact **per-vertex, up-to-4-bones**
+    runtime format, built by the exe's CPU loader from the `.x` file's per-bone `SkinWeights`
+    blocks; it does not directly explain the per-block N−1 weight count in the file itself.
+    Still useful confirmation that "N−1 explicit + 1 implicit" is a real, intentional pattern in
+    this engine, not file corruption.
+- **Collision (`PhysicsWorld.h/.mm`) — implemented for the first time.** It was a pure stub
+  (`checkCollisionAtPosition:` always returned `NO`, `groundHeightAtX:z:` always returned the
+  flat `groundY`). Now: it takes the level's own entity list (`LevelLoader.entities`) and uses
+  each entity's `RADIUS` field from `data/elements.txt` — confirmed against the exe's own
+  keyword table (`strings` shows the literal field list `ELEMENT/FILE/RADIUS/SCALING/SPEED/
+  WALKANIM/TYPE/PLATTFORM/RECTFORM/DECO/ELEVATOR/MOVER/JUMPER/ENEMY/ELEVATORENEMY/JUMPHEIGHT/
+  VERTICALOFFSET/EXIT/BONUS/FRICTION/SAVEPOINT/EXTRALIFE`, an exact match for what
+  `ElementCatalog.h` already parses):
+  - `groundHeightAtX:z:` finds the highest PLATTFORM/RECTFORM entity whose XZ footprint (circle
+    of its RADIUS, or a 1.5-unit default half-grid-cell when RADIUS is absent) contains the
+    point, and returns that entity's own Y as the platform top.
+  - `checkCollisionAtPosition:radius:` / `collidingEntityAtPosition:radius:` do circle-vs-circle
+    collision against ENEMY/ELEVATORENEMY entities, vertical-band-limited (±3 units) so enemies
+    on a different platform don't collide through the level.
+  - `CharacterController` now has an optional `physicsWorld` property: when set, ground checks
+    use the real level geometry instead of a flat y=0 plane, and each `update:` checks enemy
+    overlap and enters `CharacterStateHurt`.
+  - **Not yet done**: nothing currently calls `[characterController setPhysicsWorld:...]` or
+    `[physicsWorld setEntities:levelLoader.entities]` — `GameEngine.mm`'s render loop still runs
+    its own separate, working level-viewer path and never touches `LevelLoader` /
+    `PhysicsWorld` / `CharacterController` / `AnimationSystem` (verified: none of those four
+  - **Wired up in this session**: `MetalView.mm` now owns a `PhysicsWorld` + `CharacterController`
+    and 3 on-screen buttons (◀ ▶ ▲ — the DINPUT8 replacement). `loadLevel:` feeds `PhysicsWorld`
+    the real level data via the same `[GameEngine parseLevelData:]` LevelRenderer itself uses
+    (added a `radius` field to `LevelObject` + `elements.txt`'s `RADIUS` line, so it carries the
+    same collision data end to end). Each frame, `drawInMTKView:` steps `CharacterController`
+    against real ground height / enemy collision and shows live position + state on the existing
+    text overlay. **Still not done**: this proves the simulation is real and correct, but doesn't
+    yet draw a moving Santa mesh inside the level — `LevelRenderer.encodeInto:` only draws the
+    static placed objects today. Rendering an animated, moving character inside the level view is
+    the next real milestone (needs a second draw call in `encodeInto:`/`drawInMTKView:` for a
+    dynamic mesh at `_character.position`, plus `AnimationSystem` playback driving its pose).
+
+## Windows DLL dependencies — exe import table (2026-09-26)
+
+Full DLL import table pulled from `SantaClausInTrouble.exe` via `objdump -p` (100% reliable —
+straight from the PE header, no guessing). What each needs on iOS/ARM64:
+
+| DLL | Purpose | iOS status |
+|---|---|---|
+| `d3d8.dll` | 3D rendering | ✅ Metal (`Shaders.metal`, `MetalView.mm`) |
+| `DSOUND.dll` | Audio | ✅ AVFoundation (`AudioEngine.mm`) |
+| `DINPUT8.dll` | Keyboard/gamepad input | ⚠️ Only camera-touch gestures exist; `CharacterController`'s `setInputLeft/Right/triggerJump` aren't wired to any on-screen UI yet |
+| `USER32.dll` / `GDI32.dll` | Win32 window chrome + GDI text-to-bitmap (`CreateFontA`, `DrawTextA`, `CreateDIBSection`...) | 🚫 Not needed — in-game text already uses the real bitmap font (`FontRenderer.mm`); this was Win32 dialog/options-menu chrome only |
+| `KERNEL32.dll` | Generic OS (files/memory/threads) | 🚫 Covered by iOS/Foundation + C++ stdlib already |
+| `SHELL32.dll` (`ShellExecuteA`) | Opens `cdv.url` / `joymania.url` publisher links | 🚫 Gameplay-irrelevant |
+| `ole32.dll` | COM init (DirectX/DirectInput boilerplate) | 🚫 Metal/AVFoundation don't need COM |
+| **`WSOCK32.dll`** | **Investigated in full — see below** | 🚫 Confirmed dead-end, not needed |
+
+### WSOCK32.dll — full investigation (corrected from an earlier "uncertain" guess)
+
+Decoded all 26 imported ordinals against the authoritative Winsock ordinal table
+(`accept`=1, `bind`=2, `closesocket`=3, `getsockopt`=7, `htonl`=8, `htons`=9, `inet_ntoa`=11,
+`ioctlsocket`=12, `listen`=13, `ntohs`=15, `recv`=16, `recvfrom`=17, `select`=18, `send`=19,
+`sendto`=20, `setsockopt`=21, `shutdown`=22, `gethostbyaddr`=51, `gethostbyname`=52,
+`gethostname`=57, `WSAAsyncSelect`=101, `WSAAsyncGetHostByAddr`=102,
+`WSAAsyncGetHostByName`=103, `WSAGetLastError`=111, `WSAStartup`=115, `WSACleanup`=116).
+Notably `connect`/`socket` themselves are **not** in the static import table — they're almost
+certainly resolved dynamically via `GetProcAddress` (both `KERNEL32.LoadLibraryA` and
+`GetProcAddress` are imported), i.e. this is an optional feature that degrades gracefully if
+unavailable.
+
+Cross-referencing the exe's own strings confirms what it's for — an online login / highscore
+subsystem (`"MOS Client: start connecting to %s port:%d"`, `"Connecting to server: %s:%d..."`,
+`"Login to server as \"%s\"..."`, `"Login to subserver - id:%d..."`, `"Socket already in use"`,
+`"Socket creationf failed"`), i.e. CDV/Joymania's own online service, unrelated to
+`xmas.xpk`/level/asset loading (all independently verified elsewhere in this file).
+
+**Conclusion: not needed for the iOS port.** The publisher's 2002 game server has been offline
+for over two decades, so even the original Windows build can no longer reach it — this whole
+subsystem is inert today either way. No ARM64/iOS replacement required.
+
 ## Known gaps (not done)
 - `.ani` keyframes: 80‑byte records (4×4 matrix, 3 floats ≈ scale, u32 ms time, step 160) recognised, but clip/bone boundaries not decoded → no animation playback yet.
 - `qmeter.jpg` texture referenced by `qmeter.x` does not exist in the archive (falls back to white).
