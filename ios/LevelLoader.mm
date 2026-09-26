@@ -64,7 +64,6 @@
         if (def && !def->meshFile.empty()) {
             le.meshFile = [NSString stringWithUTF8String:def->meshFile.c_str()];
         }
-        le.radius = def ? def->radius : 0.0f;
         le.position = simd_make_float3(e.x, e.y, e.z);
         le.rotation = simd_make_float3(e.rotX, e.rotY, e.rotZ);
         le.variant = e.variant;

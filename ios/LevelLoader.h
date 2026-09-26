@@ -21,12 +21,6 @@
 @property (nonatomic) simd_float3 position;
 @property (nonatomic) simd_float3 rotation;
 @property (nonatomic) int32_t variant;
-// From elements.txt RADIUS — the same field the original exe's collision
-// code reads per element (verified against SantaClausInTrouble.exe's
-// elements.txt keyword table: ELEMENT/FILE/RADIUS/SCALING/SPEED/...).
-// Already in world units (matches the 3.0-unit level grid), 0 if the
-// catalog entry had no RADIUS line.
-@property (nonatomic) float radius;
 @end
 
 @interface LevelLoader : NSObject

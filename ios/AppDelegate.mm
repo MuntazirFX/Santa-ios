@@ -2,20 +2,40 @@
 #import "GameEngine.h"
 #import "MetalView.h"
 #import "BuildInfo.h"
+#import "VirtualJoystick.h"
 
 @interface AppDelegate ()
 @property (strong, nonatomic) MetalView *metalView;
 @property (strong, nonatomic) UITextView *logView;
+@property (strong, nonatomic) VirtualJoystickView *joystickView;
+@property (strong, nonatomic) UIButton *jumpButton;
+@property (strong, nonatomic) UILabel *livesLabel;
+@property (strong, nonatomic) NSTimer *hudTimer;
 @end
 
 @implementation AppDelegate
 
-// Level | Santa | Log
+// Level | Santa | Play | Log
 - (void)modeChanged:(UISegmentedControl *)seg {
     NSInteger i = seg.selectedSegmentIndex;
-    self.metalView.showLevel = (i == 0);
-    self.logView.hidden = (i != 2);
+    BOOL playing = (i == 2);
+    self.metalView.showLevel = (i == 0 || i == 2);
+    self.metalView.playMode = playing;
+    self.logView.hidden = (i != 3);
+    self.joystickView.hidden = !playing;
+    self.jumpButton.hidden = !playing;
+    self.livesLabel.hidden = !playing;
     [self.metalView setTextToDisplay:(i == 1) ? @"Santa Claus in Trouble" : @""];
+}
+
+- (void)jumpPressed {
+    [self.metalView triggerPlayerJump];
+}
+
+- (void)updateHUD {
+    if (self.livesLabel.hidden) return;
+    int lives = self.metalView.playerLives;
+    self.livesLabel.text = (lives >= 0) ? [NSString stringWithFormat:@"♥ %d", lives] : @"";
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
@@ -77,9 +97,9 @@
     
     tv.text = log;
     
-    // Mode switch (top centre): Level / Santa / Log
-    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Level", @"Santa", @"Log"]];
-    seg.frame = CGRectMake((vc.view.bounds.size.width - 230) / 2, 8, 230, 30);
+    // Mode switch (top centre): Level / Santa / Play / Log
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Level", @"Santa", @"Play", @"Log"]];
+    seg.frame = CGRectMake((vc.view.bounds.size.width - 280) / 2, 8, 280, 30);
     seg.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
     seg.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
     [seg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor]} forState:UIControlStateNormal];
@@ -87,8 +107,42 @@
     seg.selectedSegmentIndex = levelOK ? 0 : 1;
     [seg addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
     [vc.view addSubview:seg];
+
+    // Play-mode controls: bottom-left joystick (move), bottom-right button
+    // (jump). Separate UIViews so they never compete with the level's
+    // pan/pinch/rotate camera gestures on MetalView.
+    CGFloat pad = 24, jsSize = 120, jumpSize = 76;
+    CGFloat vh = vc.view.bounds.size.height, vw = vc.view.bounds.size.width;
+    VirtualJoystickView *joystick = [[VirtualJoystickView alloc] initWithFrame:CGRectMake(pad, vh - jsSize - pad - 20, jsSize, jsSize)];
+    joystick.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleRightMargin;
+    __weak MetalView *weakMV = mv;
+    joystick.onMove = ^(float dx, float dz) { [weakMV setPlayerMoveX:dx z:dz]; };
+    [vc.view addSubview:joystick];
+    self.joystickView = joystick;
+
+    UIButton *jump = [UIButton buttonWithType:UIButtonTypeSystem];
+    jump.frame = CGRectMake(vw - jumpSize - pad, vh - jumpSize - pad - 20, jumpSize, jumpSize);
+    jump.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin;
+    jump.layer.cornerRadius = jumpSize / 2.0;
+    jump.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    jump.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.4].CGColor;
+    jump.layer.borderWidth = 1.5;
+    [jump setTitle:@"JUMP" forState:UIControlStateNormal];
+    [jump setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [jump addTarget:self action:@selector(jumpPressed) forControlEvents:UIControlEventTouchDown];
+    [vc.view addSubview:jump];
+    self.jumpButton = jump;
+
+    UILabel *lives = [[UILabel alloc] initWithFrame:CGRectMake(pad, 48, 100, 30)];
+    lives.textColor = [UIColor whiteColor];
+    lives.font = [UIFont boldSystemFontOfSize:20];
+    lives.text = @"";
+    [vc.view addSubview:lives];
+    self.livesLabel = lives;
+    self.hudTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 target:self selector:@selector(updateHUD) userInfo:nil repeats:YES];
+
     [self modeChanged:seg];
-    
+
     self.window.rootViewController = vc;
     [self.window makeKeyAndVisible];
     return YES;

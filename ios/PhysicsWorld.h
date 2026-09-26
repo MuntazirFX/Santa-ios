@@ -1,57 +1,52 @@
 #import <Foundation/Foundation.h>
 #import <simd/simd.h>
 
-@class LevelEntity;
-@class LevelObject; // from GameEngine.h — the level type the working level viewer actually uses
-
 // ============================================================
 // Physics World
 //
-// Collision against the level's own object list (from LevelLoader),
-// using the same per-object RADIUS the original exe's elements.txt
-// catalog defines (verified against SantaClausInTrouble.exe's string
-// table: ELEMENT/FILE/RADIUS/SCALING/SPEED/... keyword list, and
-// against data/elements.txt itself).
+// Real ground/collision detection against the level's own platform
+// objects (loaded from levels\NNN.dat, resolved via data/elements.txt).
 //
-// Two kinds of check, matching how the catalog's TYPE values split:
-//  - "solid ground" types (PLATTFORM, RECTFORM) are used for the
-//    downward ground-height raycast a character stands on.
-//  - "actor" types (ENEMY, ELEVATORENEMY) are used for circle-vs-circle
-//    collision against the character's own radius.
-// Both are grid-object approximations (circle/column footprint from
-// RADIUS, or a default half-grid-cell footprint of 1.5 world units
-// when a catalog entry has no RADIUS), not exact mesh collision —
-// good enough to stand on platforms and take enemy hits; swap in
-// real per-mesh AABBs later if more precision is needed.
+// Convention (matches LevelRenderer.mm exactly, so a platform that
+// renders at a given spot collides at that same spot):
+//   * data/elements.txt RADIUS is the model's footprint radius; SCALING
+//     >= 1 is a PERCENT (divide by 100), < 1 is used as-is.
+//   * a platform's own y (from the level file) is its walkable surface
+//     height — the same value LevelRenderer.mm uses to place Santa's
+//     feet at the spawn point.
+//   * footprint is treated as a circle of that scaled radius. The game
+//     data only ever gives one RADIUS number per element (no separate
+//     width/depth), so this is what the data itself supports — not an
+//     approximation of some other shape.
 // ============================================================
+
+// One walkable surface, already resolved to world space + real radius.
+typedef struct {
+    float x, y, z;
+    float radius;
+    BOOL isHazard;   // ENEMY / ELEVATORENEMY — touching this can hurt Santa
+} PhysicsFootprint;
+
+@class LevelObject;
 
 @interface PhysicsWorld : NSObject
 
-@property (nonatomic) float groundY;          // fallback ground plane, used if no platform is under the point
-@property (nonatomic) float platformThickness; // how far below its authored Y a platform's top still counts as "on" it
+// Default ground level, used only until a level's platforms are loaded
+// (or as a floor-of-last-resort so Santa can never fall through the
+// world if he ends up outside every platform's footprint).
+@property (nonatomic) float groundY;
 
-// Give the physics world the current level's object list (call this
-// once after LevelLoader's loadLevel: succeeds, e.g.
-// `[physicsWorld setEntities:levelLoader.entities];`).
-- (void)setEntities:(NSArray<LevelEntity *> *)entities;
+// Build the collision world from a level's objects. Call this once right
+// after LevelRenderer/GameEngine load a level (same object list they use
+// to place the visuals, so collision and rendering never disagree).
+- (void)buildFromLevelObjects:(NSArray<LevelObject *> *)objects;
 
-// Same idea, but for LevelObject (GameEngine.h / MetalView's own working
-// level parser — data\NNN.dat + elements.txt, already verified byte-exact).
-// This is the one to use today; LevelLoader/LevelEntity above is a separate,
-// not-yet-wired-in level representation.
-- (void)setEntitiesFromLevelObjects:(NSArray<LevelObject *> *)objects;
-
-// Check if a circle of the given radius at `position` overlaps any
-// ENEMY / ELEVATORENEMY entity's own radius. Vertical band-limited so
-// enemies on a different platform don't collide through the level.
-- (BOOL)checkCollisionAtPosition:(simd_float3)position radius:(float)radius;
-
-// Same idea, but returns the colliding entity (or nil) so the caller
-// can tell what was hit.
-- (LevelEntity *)collidingEntityAtPosition:(simd_float3)position radius:(float)radius;
-
-// Highest PLATTFORM/RECTFORM top surface whose XZ footprint contains
-// (x, z), or groundY if nothing is under the point.
+// Highest walkable surface directly under (x,z), or groundY if nothing
+// is under that point.
 - (float)groundHeightAtX:(float)x z:(float)z;
 
+// YES if (x,z) at the given radius overlaps a hazard object (enemy).
+- (BOOL)checkCollisionAtPosition:(simd_float3)position radius:(float)radius;
+
 @end
+

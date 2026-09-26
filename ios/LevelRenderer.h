@@ -3,6 +3,8 @@
 #import <UIKit/UIKit.h>
 #import <simd/simd.h>
 
+@class LevelObject;
+
 // ============================================================
 // LevelRenderer — draws a whole level (levels\NNN.dat) with Metal.
 //
@@ -26,6 +28,15 @@
 @property (nonatomic, readonly) NSUInteger objectCount;   // objects placed on screen
 @property (nonatomic, readonly) NSString *summary;        // human readable load report
 
+// The raw placed-object list from levels\NNN.dat (name + world position +
+// resolved element type), for anything that needs the level's own data —
+// PhysicsWorld builds its collision footprints straight from this so
+// collision can never disagree with what's on screen.
+@property (nonatomic, readonly) NSArray<LevelObject *> *objects;
+// Where Santa starts: the first placed object's position (same point this
+// renderer already stands the static bind-pose Santa on).
+@property (nonatomic, readonly) simd_float3 spawnPoint;
+
 - (instancetype)initWithDevice:(id<MTLDevice>)device
                    colorFormat:(MTLPixelFormat)colorFormat
                    depthFormat:(MTLPixelFormat)depthFormat;
@@ -38,21 +49,22 @@
         depthState:(id<MTLDepthStencilState>)depthState
       viewportSize:(CGSize)size;
 
-// The player character mesh (e.g. "gfx\\weihnachtsman_000.x"), drawn on top
-// of the static level batches each frame at `characterTransform`. Loads and
-// caches once; safe to call again with the same file. NOTE: Santa isn't a
-// data\elements.txt catalog entry (he's spawned by game code, not placed
-// like level objects), so there's no authored SCALING value for him — the
-// scale baked into `characterTransform` by the caller is a visual estimate,
-// not a verified constant like the level objects' own SCALING values are.
-- (BOOL)loadCharacterMesh:(NSString *)file;
-@property (nonatomic) BOOL hasCharacter;         // YES once loadCharacterMesh: succeeds and the caller wants it drawn
-@property (nonatomic) simd_float4x4 characterTransform;  // column-major model matrix, set every frame by the caller
-
 // Camera control (called from gesture recognizers)
 - (void)panByPixels:(CGPoint)delta viewHeight:(CGFloat)viewHeight;   // one finger drag
 - (void)zoomByScale:(CGFloat)scale;                                   // pinch (incremental)
 - (void)rotateByRadians:(CGFloat)radians;                             // two finger rotate (incremental)
 - (void)tiltByRadians:(CGFloat)radians;                               // two finger drag up/down: camera pitch (incremental)
+
+// ---------- live Santa (Play mode) ----------
+// Overwrites the live Santa batch's transform (the same GPU mesh already
+// used for the static bind-pose display — this just makes its position
+// dynamic instead of fixed at the spawn point). facingAngle: radians about
+// Y, 0 = +Z, matching CharacterController.facingAngle / LevelModelMatrix.
+- (void)setSantaPosition:(simd_float3)position facingAngle:(float)facingAngle;
+
+// Lets Play mode drive the look-at point directly (character following)
+// instead of finger-pan. Zoom/rotate/tilt keep working normally on top of
+// whatever target is set here.
+- (void)setCameraTarget:(simd_float3)target;
 
 @end

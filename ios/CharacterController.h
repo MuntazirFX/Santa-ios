@@ -1,18 +1,15 @@
 #import <Foundation/Foundation.h>
 #import <simd/simd.h>
 
-@class PhysicsWorld;
-
 // ============================================================
 // Character Controller
 //
-// Manages Santa's movement, input, and animation state.
-//
-// Current status: SKELETON
-// - Position, velocity, ground state
-// - Input flags (left, right, jump)
-// - Update loop calls physics + animation
+// Manages Santa's movement, input, and animation state on the level's
+// X/Z ground plane (levels place platforms across both axes — see
+// LevelRenderer.h — so movement isn't left/right-only).
 // ============================================================
+
+@class PhysicsWorld;
 
 typedef NS_ENUM(NSInteger, CharacterState) {
     CharacterStateIdle,
@@ -27,29 +24,29 @@ typedef NS_ENUM(NSInteger, CharacterState) {
 // Transform
 @property (nonatomic) simd_float3 position;
 @property (nonatomic) simd_float3 velocity;
-@property (nonatomic) float facingDirection;  // -1 = left, +1 = right
+@property (nonatomic) float facingAngle;   // radians about Y, 0 = +Z (matches LevelModelMatrix's angle)
 
 // State
 @property (nonatomic) CharacterState state;
 @property (nonatomic) BOOL isOnGround;
+@property (nonatomic) int lives;           // decremented by touchHazard; not itself game-over logic
 
 // Movement parameters
-@property (nonatomic) float walkSpeed;      // default 4.0
+@property (nonatomic) float walkSpeed;      // default 4.0 (world units/sec, same units as level grid)
 @property (nonatomic) float jumpVelocity;   // default 8.0
 @property (nonatomic) float gravity;        // default -20.0
+@property (nonatomic) float radius;         // collision radius for hazard checks, default 1.0
 
-// Optional — when set, ground checks raycast against the level's own
-// PLATTFORM/RECTFORM objects (PhysicsWorld) instead of the flat y=0
-// plane, and character radius is checked against enemies each update.
-@property (nonatomic, weak) PhysicsWorld *physicsWorld;
-@property (nonatomic) float radius; // default 1.0, used against PhysicsWorld enemy collision
-
-// Input (set by UI, applied in update)
-- (void)setInputLeft:(BOOL)left;
-- (void)setInputRight:(BOOL)right;
+// Input, set every frame by whatever UI drives movement (joystick, buttons,
+// etc.) — X/Z are world-space ground-plane axes, magnitude should be 0..1
+// (a diagonal joystick push naturally gives length ~1 already; this does
+// not renormalize a shorter push, so partial pushes stay partial-speed).
+- (void)setMoveDirectionX:(float)dx z:(float)dz;
 - (void)triggerJump;
 
-// Update (called every frame)
-- (void)update:(float)deltaTime;
+// Advance the simulation one frame. `physics` supplies real ground height
+// and hazard checks from the loaded level; pass nil to fall back to a
+// flat plane at physics.groundY (0), e.g. before a level has loaded.
+- (void)update:(float)deltaTime physics:(PhysicsWorld *)physics;
 
 @end

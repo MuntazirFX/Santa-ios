@@ -500,10 +500,9 @@ struct SkinWeightsData {
     // Parses data/elements.txt: repeating blocks of
     //   ELEMENT   "Name"
     //   FILE      "gfx\...x"
-    //   RADIUS    1.6
     //   ... other KEY value lines ...
     //   TYPE      ENEMY|RECTFORM|PLATTFORM|DECO|BONUS|EXIT|JUMPER|ELEVATOR|...
-    // Returns name -> [meshFile, elementType, radiusString] (any may be empty if absent).
+    // Returns name -> [meshFile, elementType] (either may be empty if absent).
     NSData *data = [self loadAssetNamed:@"data\\elements.txt"];
     if (!data) return @{};
     
@@ -517,7 +516,6 @@ struct SkinWeightsData {
     NSString *currentName = nil;
     NSString *currentFile = @"";
     NSString *currentType = @"";
-    NSString *currentRadius = @"";
     
     NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
     for (NSString *rawLine in lines) {
@@ -526,8 +524,8 @@ struct SkinWeightsData {
         
         if ([line hasPrefix:@"ELEMENT"]) {
             // Flush previous element into the catalog before starting a new one.
-            if (currentName) catalog[currentName] = @[currentFile, currentType, currentRadius];
-            currentFile = @""; currentType = @""; currentRadius = @"";
+            if (currentName) catalog[currentName] = @[currentFile, currentType];
+            currentFile = @""; currentType = @"";
             
             NSRange q1 = [line rangeOfString:@"\""];
             if (q1.location != NSNotFound) {
@@ -551,12 +549,9 @@ struct SkinWeightsData {
         } else if ([line hasPrefix:@"TYPE"]) {
             NSString *rest = [line substringFromIndex:4];
             currentType = [rest stringByTrimmingCharactersInSet:ws];
-        } else if ([line hasPrefix:@"RADIUS"]) {
-            NSString *rest = [line substringFromIndex:6];
-            currentRadius = [rest stringByTrimmingCharactersInSet:ws];
         }
     }
-    if (currentName) catalog[currentName] = @[currentFile, currentType, currentRadius];
+    if (currentName) catalog[currentName] = @[currentFile, currentType];
     
     return catalog;
 }
@@ -623,7 +618,6 @@ struct SkinWeightsData {
             }
             obj.meshFile = file.length > 0 ? file : nil;
             obj.elementType = info[1];
-            obj.radius = (info.count > 2) ? [info[2] floatValue] : 0.0f;
         }
         
         [objects addObject:obj];

@@ -64,7 +64,10 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
     float _pitch;
     NSUInteger _texMissing;   // unique textures that fell back to white
 
-    LevelGPUMesh *_characterMesh;
+    NSArray<LevelObject *> *_objects;
+    simd_float3 _spawnPoint;
+    LevelBatch *_santaBatch;
+    float _santaScale;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -245,12 +248,6 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
     return gm;
 }
 
-- (BOOL)loadCharacterMesh:(NSString *)file {
-    if (_characterMesh) return YES; // already loaded (cached — same as the level's own batches)
-    _characterMesh = [self buildGPUMeshForFile:file];
-    return _characterMesh != nil;
-}
-
 - (BOOL)loadLevel:(NSString *)levelPath {
     _hasLevel = NO;
     _objectCount = 0;
@@ -273,6 +270,7 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
         _summary = [NSString stringWithFormat:@"%@: no objects", levelPath];
         return NO;
     }
+    _objects = objects;
 
     NSMutableDictionary<NSString *, LevelBatch *> *byMesh = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *failedMeshes = [NSMutableSet set];
@@ -333,6 +331,7 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
     // Model: bind pose, feet at y = 0 after the frame transform (see GameEngine.mm),
     // scale 0.014 (same modelling scale as the troll) = ~1.8 world units tall.
     BOOL santaPlaced = NO;
+    _santaBatch = nil;
     if (haveStart) {
         LevelGPUMesh *sg = [self buildGPUMeshForFile:@"gfx\\weihnachtsman_000.x"];
         if (sg) {
@@ -346,6 +345,9 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
             sb.count = 1;
             [_batches addObject:sb];
             santaPlaced = YES;
+            _santaBatch = sb;
+            _santaScale = santaScale;
+            _spawnPoint = simd_make_float3(_target.x, sy, _target.z);
         }
     }
 
@@ -419,19 +421,6 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
                    indexBufferOffset:0];
         }
     }
-
-    // Player character (Santa), drawn on top with a caller-supplied transform.
-    if (_hasCharacter && _characterMesh) {
-        simd_float4x4 model = _characterTransform;
-        [e setVertexBuffer:_characterMesh.vertexBuffer offset:0 atIndex:0];
-        [e setFragmentTexture:_characterMesh.texture atIndex:0];
-        [e setVertexBytes:&model length:sizeof(model) atIndex:2];
-        [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                      indexCount:_characterMesh.indexCount
-                       indexType:MTLIndexTypeUInt32
-                     indexBuffer:_characterMesh.indexBuffer
-               indexBufferOffset:0];
-    }
 }
 
 // ---------- camera control ----------
@@ -461,6 +450,21 @@ static simd_float4x4 LevelModelMatrix(float x, float y, float z, float angle, fl
 
 - (void)rotateByRadians:(CGFloat)radians {
     _yaw -= (float)radians;   // scene follows the fingers (clockwise on screen)
+}
+
+// ---------- live Santa (Play mode) ----------
+- (void)setSantaPosition:(simd_float3)position facingAngle:(float)facingAngle {
+    if (!_santaBatch) return;
+    simd_float4x4 m = LevelModelMatrix(position.x, position.y, position.z, facingAngle, _santaScale);
+    NSMutableData *models = _santaBatch.models;
+    if (models.length != sizeof(m)) models = [NSMutableData dataWithLength:sizeof(m)];
+    memcpy(models.mutableBytes, &m, sizeof(m));
+    _santaBatch.models = models;
+    _santaBatch.count = 1;
+}
+
+- (void)setCameraTarget:(simd_float3)target {
+    _target = target;
 }
 
 @end

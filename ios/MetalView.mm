@@ -5,17 +5,14 @@
 #import "LevelRenderer.h"
 #import "PhysicsWorld.h"
 #import "CharacterController.h"
-#include "TextureLoader.h"
 #import <Metal/Metal.h>
 #import <simd/simd.h>
-#import <QuartzCore/QuartzCore.h>
 
 // Direct3D-style back-face culling (clockwise = front). Verified on the real
 // Santa mesh: with a left-handed camera, keeping only clockwise triangles
 // reproduces the full render pixel-for-pixel. If a model ever disappears,
 // set this to NO to rule culling out.
 static const BOOL kCullBackFaces = YES;
-static const float kPi = 3.14159265358979f;
 
 // Left-handed rotation about Y (D3DXMatrixRotationY, written for column vectors).
 static simd_float4x4 RotationY(float a) {
@@ -50,31 +47,10 @@ static simd_float4x4 RotationY(float a) {
     FontRenderer *_fontRenderer;
     NSString *_displayText;
 
-    // Gameplay — DINPUT8 replacement (on-screen touch controls) + real
-    // level collision, wired to the actual working level parser
-    // ([GameEngine parseLevelData:], same data LevelRenderer draws).
     PhysicsWorld *_physicsWorld;
     CharacterController *_character;
-    BOOL _controlsEnabled;
-    BOOL _showingGameplayDebugText;
-    CFTimeInterval _lastFrameTime;
-    UIButton *_btnLeft, *_btnRight, *_btnJump;
-
-    // Main menu overlay (matches the original PC title screen: maps\sc.dds
-    // has the "CDV FunLine" banner + "cdv" logo + the "Santa Claus in
-    // Trouble" cursive title baked into one texture; maps\joymania.dds has
-    // the "JD Joymania Development" corner logo. Both also contain other,
-    // unrelated art lower in the same texture — cropped out below using
-    // exact alpha-channel bounding boxes measured from the real files, not
-    // guessed). Drawn on top of the already-working Level view; "START
-    // GAME" hides this and reveals the ◀ ▶ ▲ movement controls.
-    BOOL _inMainMenu;
-    id<MTLTexture> _scTexture, _joymaniaTexture;
-    id<MTLBuffer> _scVertexBuffer, _joymaniaVertexBuffer;
-    int _scVertexCount, _joymaniaVertexCount;
-    id<MTLBuffer> _menuTextVertexBuffer[4];
-    int _menuTextVertexCount[4];
-    UIButton *_btnStart, *_btnHighscores, *_btnOptions, *_btnQuit;
+    BOOL _playMode;
+    CFTimeInterval _lastUpdateTime;   // 0 = "just (re)entered play mode", avoids a huge first dt
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -177,245 +153,46 @@ static simd_float4x4 RotationY(float a) {
         [self addGestureRecognizer:pan];
         [self addGestureRecognizer:pinch];
         [self addGestureRecognizer:twist];
-
-        // Gameplay: PhysicsWorld + CharacterController + on-screen buttons
-        // (DINPUT8 replacement — the exe read arrow keys/space here).
-        _physicsWorld = [[PhysicsWorld alloc] init];
-        _character = [[CharacterController alloc] init];
-        _character.physicsWorld = _physicsWorld;
-        _controlsEnabled = NO;
-        _lastFrameTime = 0;
-
-        // Real frames are set in -layoutSubviews (not here): `frame` above is
-        // often CGRectZero at this point (the owning UIViewController's view
-        // isn't in a window yet), so anything positioned from it here would
-        // be placed off-screen and never move — autoresizing only resizes
-        // this view itself, not these subviews' already-fixed frames.
-        _btnLeft = [self makeControlButton:@"◀" frame:CGRectZero];
-        _btnRight = [self makeControlButton:@"▶" frame:CGRectZero];
-        _btnJump = [self makeControlButton:@"▲" frame:CGRectZero];
-        [_btnLeft addTarget:self action:@selector(leftDown) forControlEvents:UIControlEventTouchDown];
-        [_btnLeft addTarget:self action:@selector(leftUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
-        [_btnRight addTarget:self action:@selector(rightDown) forControlEvents:UIControlEventTouchDown];
-        [_btnRight addTarget:self action:@selector(rightUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
-        [_btnJump addTarget:self action:@selector(jumpTapped) forControlEvents:UIControlEventTouchDown];
-        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = YES; // shown once a level with a playable character loads
-        [self addSubview:_btnLeft];
-        [self addSubview:_btnRight];
-        [self addSubview:_btnJump];
-
-        // Main menu buttons — invisible hit targets over the bitmap-font
-        // labels drawn by the Metal sprite pass (same "transparent UIButton
-        // on top of custom-rendered text" pattern as the ◀▶▲ controls, so
-        // taps land on the real "START GAME" glyphs instead of guessed rects).
-        _inMainMenu = YES;
-        _btnStart = [self makeMenuHitTarget];
-        _btnHighscores = [self makeMenuHitTarget];
-        _btnOptions = [self makeMenuHitTarget];
-        _btnQuit = [self makeMenuHitTarget];
-        [_btnStart addTarget:self action:@selector(startGameTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_btnHighscores addTarget:self action:@selector(highscoresTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_btnOptions addTarget:self action:@selector(optionsTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_btnQuit addTarget:self action:@selector(quitTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:_btnStart];
-        [self addSubview:_btnHighscores];
-        [self addSubview:_btnOptions];
-        [self addSubview:_btnQuit];
     }
     return self;
-}
-
-- (UIButton *)makeMenuHitTarget {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom]; // invisible — the Metal pass draws the real label
-    b.backgroundColor = [UIColor clearColor];
-    return b;
-}
-
-// Shared layout for the 4 menu items — bottom-left stack, matching the PC
-// title screen's START GAME / HIGHSCORES / OPTIONS / (gap) / QUIT layout.
-// Used both to position the invisible tap targets and to place the
-// bitmap-font label text, so the two always line up.
-- (void)computeMenuButtonRects:(CGRect[4])out {
-    CGFloat rowH = fminf(self.bounds.size.height * 0.05f, 40.0f);
-    CGFloat left = self.bounds.size.width * 0.04f;
-    CGFloat w = self.bounds.size.width * 0.5f;
-    CGFloat bottom = self.bounds.size.height * 0.86f; // QUIT's baseline, matches reference proportions
-    out[3] = CGRectMake(left, bottom, w, rowH);                    // QUIT
-    out[2] = CGRectMake(left, bottom - rowH * 2.3f, w, rowH);      // OPTIONS
-    out[1] = CGRectMake(left, bottom - rowH * 3.5f, w, rowH);      // HIGHSCORES
-    out[0] = CGRectMake(left, bottom - rowH * 4.7f, w, rowH);      // START GAME
-}
-
-- (void)layoutMenuHitTargets {
-    CGRect r[4]; [self computeMenuButtonRects:r];
-    _btnStart.frame = r[0];
-    _btnHighscores.frame = r[1];
-    _btnOptions.frame = r[2];
-    _btnQuit.frame = r[3];
-    BOOL show = _inMainMenu;
-    _btnStart.hidden = _btnHighscores.hidden = _btnOptions.hidden = _btnQuit.hidden = !show;
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    // Real, always-current positions — self.bounds is correct here even on
-    // the very first layout pass, unlike the `frame` initWithFrame: got.
-    CGFloat bs = 64, margin = 24;
-    CGFloat bottom = self.bounds.size.height - bs - margin;
-    _btnLeft.frame = CGRectMake(margin, bottom, bs, bs);
-    _btnRight.frame = CGRectMake(margin + bs + 16, bottom, bs, bs);
-    _btnJump.frame = CGRectMake(self.bounds.size.width - bs - margin, bottom, bs, bs);
-    [self layoutMenuHitTargets];
-    if (_scTexture || _joymaniaTexture) [self rebuildMenuSpriteBuffers]; // re-lay-out on rotation/resize
-}
-
-- (UIButton *)makeControlButton:(NSString *)title frame:(CGRect)frame {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.frame = frame;
-    b.layer.cornerRadius = 32;
-    b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.28];
-    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.6].CGColor;
-    b.layer.borderWidth = 1.5;
-    [b setTitle:title forState:UIControlStateNormal];
-    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont systemFontOfSize:28];
-    return b;
-}
-
-- (void)leftDown  { [_character setInputLeft:YES]; }
-- (void)leftUp    { [_character setInputLeft:NO]; }
-- (void)rightDown { [_character setInputRight:YES]; }
-- (void)rightUp   { [_character setInputRight:NO]; }
-- (void)jumpTapped { [_character triggerJump]; }
-
-// ---------- main menu ----------
-- (void)startGameTapped {
-    _inMainMenu = NO;
-    [self layoutMenuHitTargets];
-    _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = !_controlsEnabled;
-}
-- (void)highscoresTapped {
-    // No highscore storage exists yet (this port doesn't have score.dat
-    // support) — visual-only for now, matches the exe's screen but does
-    // nothing further.
-}
-- (void)optionsTapped {
-    // No settings screen exists yet — visual-only for now.
-}
-- (void)quitTapped {
-    // iOS apps don't self-terminate (Apple HIG) — nothing to do here.
-}
-
-- (id<MTLTexture>)loadXPKTexture:(NSString *)assetPath {
-    NSData *raw = [GameEngine loadAssetNamed:assetPath];
-    if (!raw) { NSLog(@"[Menu] asset not found: %@", assetPath); return nil; }
-    std::vector<uint8_t> bytes((const uint8_t *)raw.bytes, (const uint8_t *)raw.bytes + raw.length);
-    std::vector<uint8_t> rgba; int w = 0, h = 0;
-    if (!TextureLoader::decodeImage(bytes, rgba, w, h)) { NSLog(@"[Menu] decode failed: %@", assetPath); return nil; }
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                    width:w height:h mipmapped:NO];
-    td.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> tex = [_device newTextureWithDescriptor:td];
-    [tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:rgba.data() bytesPerRow:(NSUInteger)(w * 4)];
-    return tex;
-}
-
-// Builds a 6-vertex (ndcX,ndcY,u,v) textured quad for a screen-space rect
-// (points) cropped to a UV sub-rect — same vertex layout _spritePipelineState
-// already expects (FontRenderer's buildTextVertices uses the same format).
-- (NSData *)buildSpriteQuadInRect:(CGRect)rectPoints uv:(CGRect)uvRect screenSize:(CGSize)screenSize {
-    float x0 = (float)(rectPoints.origin.x / screenSize.width) * 2.0f - 1.0f;
-    float x1 = (float)((rectPoints.origin.x + rectPoints.size.width) / screenSize.width) * 2.0f - 1.0f;
-    float y0 = 1.0f - (float)(rectPoints.origin.y / screenSize.height) * 2.0f;
-    float y1 = 1.0f - (float)((rectPoints.origin.y + rectPoints.size.height) / screenSize.height) * 2.0f;
-    float u0 = uvRect.origin.x, u1 = uvRect.origin.x + uvRect.size.width;
-    float v0 = uvRect.origin.y, v1 = uvRect.origin.y + uvRect.size.height;
-    float verts[] = {
-        x0, y0, u0, v0,   x1, y0, u1, v0,   x0, y1, u0, v1,
-        x1, y0, u1, v0,   x1, y1, u1, v1,   x0, y1, u0, v1,
-    };
-    return [NSData dataWithBytes:verts length:sizeof(verts)];
-}
-
-- (void)loadMenuAssets {
-    if (_scTexture && _joymaniaTexture) return;
-    _scTexture = [self loadXPKTexture:@"maps\\sc.dds"];
-    _joymaniaTexture = [self loadXPKTexture:@"maps\\joymania.dds"];
-    [self rebuildMenuSpriteBuffers];
-}
-
-- (void)rebuildMenuSpriteBuffers {
-    CGSize ds = self.drawableSize;
-    if (ds.width <= 0) ds = self.bounds.size;
-    CGFloat scale = ds.width / fmaxf(self.bounds.size.width, 1.0f); // points -> pixels
-
-    // maps\sc.dds: banner+title occupy UV u[0,0.8945] v[0,0.5] (measured from
-    // the file's own alpha channel). Placed top-left-ish, width-driven, with
-    // the texture's own 1.785:1 aspect ratio preserved.
-    if (_scTexture) {
-        CGFloat w = self.bounds.size.width * 0.62f;
-        CGFloat h = w * (256.0f / 457.0f);
-        CGRect r = CGRectMake(self.bounds.size.width * 0.03f, self.bounds.size.height * 0.02f, w, h);
-        NSData *d = [self buildSpriteQuadInRect:r uv:CGRectMake(0, 0, 0.8945, 0.5) screenSize:self.bounds.size];
-        _scVertexBuffer = [_device newBufferWithBytes:d.bytes length:d.length options:MTLResourceStorageModeShared];
-        _scVertexCount = 6;
-    }
-    // maps\joymania.dds: logo text block is UV u[0.0156,0.9844] v[0.0234,0.2461]
-    // (the same texture also has an unrelated gold figurine lower down, excluded).
-    if (_joymaniaTexture) {
-        CGFloat w = self.bounds.size.width * 0.34f;
-        CGFloat h = w * (57.0f / 248.0f);
-        CGRect r = CGRectMake(self.bounds.size.width - w - self.bounds.size.width * 0.03f,
-                               self.bounds.size.height * 0.93f, w, h);
-        NSData *d = [self buildSpriteQuadInRect:r uv:CGRectMake(0.0156, 0.0234, 0.9688, 0.2227) screenSize:self.bounds.size];
-        _joymaniaVertexBuffer = [_device newBufferWithBytes:d.bytes length:d.length options:MTLResourceStorageModeShared];
-        _joymaniaVertexCount = 6;
-    }
-    [self rebuildMenuTextBuffers];
-}
-
-- (void)rebuildMenuTextBuffers {
-    if (!_fontRenderer) return;
-    CGSize ds = self.drawableSize;
-    if (ds.width <= 0) ds = self.bounds.size;
-    NSArray<NSString *> *labels = @[@"START GAME", @"HIGHSCORES", @"OPTIONS", @"QUIT"];
-    CGRect rects[4]; [self computeMenuButtonRects:rects];
-    for (int i = 0; i < 4; i++) {
-        float fontScale = (float)rects[i].size.height * 0.9f * (ds.height / fmaxf(self.bounds.size.height, 1.0f));
-        float penX = (float)(rects[i].origin.x * (ds.width / fmaxf(self.bounds.size.width, 1.0f)));
-        float penY = (float)((rects[i].origin.y + rects[i].size.height * 0.8f) * (ds.height / fmaxf(self.bounds.size.height, 1.0f)));
-        NSData *verts = [_fontRenderer buildTextVertices:labels[i] atPenX:penX penY:penY
-                                                   screenW:ds.width screenH:ds.height scale:fontScale];
-        if (verts.length > 0) {
-            _menuTextVertexBuffer[i] = [_device newBufferWithBytes:verts.bytes length:verts.length options:MTLResourceStorageModeShared];
-            _menuTextVertexCount[i] = (int)(verts.length / (4 * sizeof(float)));
-        } else {
-            _menuTextVertexCount[i] = 0;
-        }
-    }
 }
 
 // ---------- level view ----------
 - (BOOL)loadLevel:(NSString *)levelPath {
     BOOL ok = [_levelRenderer loadLevel:levelPath];
     if (ok) {
-        // Same parser LevelRenderer itself uses (GameEngine parseLevelData:) —
-        // gives PhysicsWorld the real per-object RADIUS/TYPE/position data.
-        NSArray<LevelObject *> *objs = [GameEngine parseLevelData:levelPath];
-        [_physicsWorld setEntitiesFromLevelObjects:objs];
-        _character.position = simd_make_float3(0, [_physicsWorld groundHeightAtX:0 z:0] + 0.01f, 0);
+        // (Re)build the collision world from the SAME object list the
+        // renderer just placed on screen, so collision can never disagree
+        // with what's visible. Spawn/reset the character at the level's
+        // start point every time a level (re)loads.
+        if (!_physicsWorld) _physicsWorld = [[PhysicsWorld alloc] init];
+        if (!_character) _character = [[CharacterController alloc] init];
+        [_physicsWorld buildFromLevelObjects:_levelRenderer.objects];
+        _character.position = _levelRenderer.spawnPoint;
         _character.velocity = simd_make_float3(0, 0, 0);
         _character.state = CharacterStateIdle;
-        _controlsEnabled = YES;
-        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = NO;
-        _lastFrameTime = 0;
-        [_levelRenderer loadCharacterMesh:@"gfx\\weihnachtsman_000.x"];
-        [self loadMenuAssets];
-    } else {
-        _controlsEnabled = NO;
-        _btnLeft.hidden = _btnRight.hidden = _btnJump.hidden = YES;
+        _character.isOnGround = YES;
+        _lastUpdateTime = 0;
     }
     return ok;
+}
+
+- (void)setPlayMode:(BOOL)playMode {
+    _playMode = playMode;
+    _lastUpdateTime = 0;   // next update: use a safe default dt, not a huge stale gap
+}
+- (BOOL)playMode { return _playMode; }
+
+- (void)setPlayerMoveX:(float)dx z:(float)dz {
+    [_character setMoveDirectionX:dx z:dz];
+}
+
+- (void)triggerPlayerJump {
+    [_character triggerJump];
+}
+
+- (int)playerLives {
+    return _character ? _character.lives : -1;
 }
 
 - (NSString *)levelSummary {
@@ -630,55 +407,14 @@ static simd_float4x4 RotationY(float a) {
     _frameCount++;
     _angle += 0.01f;
 
-    // Gameplay step — DINPUT8 replacement. Note: this drives the character's
-    // simulation state (position/velocity/state against real level ground +
-    // enemy collision) and shows it via the debug text overlay; it does not
-    // yet draw a moving Santa mesh inside the level view (LevelRenderer only
-    // draws the static placed objects today) — that's the next real step.
-    if (_controlsEnabled && levelMode && !_inMainMenu) {
+    if (levelMode && _playMode && _character) {
         CFTimeInterval now = CACurrentMediaTime();
-        float dt = (_lastFrameTime > 0) ? (float)(now - _lastFrameTime) : 0.0f;
-        _lastFrameTime = now;
-        dt = fminf(dt, 0.1f); // clamp huge first-frame / stall deltas
-        [_character update:dt];
-        NSString *stateName[] = {@"Idle", @"Walking", @"Jumping", @"Falling", @"Hurt"};
-        NSString *dbg = [NSString stringWithFormat:@"Santa (%.1f, %.1f, %.1f)  %@  ground:%@",
-                          _character.position.x, _character.position.y, _character.position.z,
-                          stateName[_character.state], _character.isOnGround ? @"Y" : @"N"];
-        if (![dbg isEqualToString:_displayText]) [self setTextToDisplay:dbg];
-        _showingGameplayDebugText = YES;
-    } else if (_showingGameplayDebugText) {
-        // Leaving level mode / entering the menu — don't leave stale
-        // "Santa (x,y,z) ..." text on screen. AppDelegate's modeChanged:
-        // sets its own text right after this for the tab-switch case; this
-        // covers the one-frame gap and the menu->play transition too.
-        [self setTextToDisplay:@""];
-        _showingGameplayDebugText = NO;
-    }
-
-    if (_controlsEnabled && levelMode) {
-        // Draw Santa in the level at the character's live position — even
-        // while still in the main menu (not moving yet, just standing on
-        // his spawn platform, same as the PC title screen).
-        // NOTE (visual estimate, not a verified constant — see LevelRenderer.h
-        // loadCharacterMesh: comment): Santa isn't in data\elements.txt so
-        // there's no authored SCALING for him like level objects have; his
-        // raw mesh bind-pose is ~129 units tall (measured in tools/test_skin.cpp),
-        // so kCharacterScale below is picked to land him around ~2.5 world
-        // units tall next to the 3.0-unit level grid — tune this by eye once
-        // you can see him next to a platform.
-        static const float kCharacterScale = 0.02f;
-        float yaw = (_character.facingDirection < 0) ? kPi : 0.0f; // model faces +Z by convention; flip for left
-        float c = cosf(yaw) * kCharacterScale, s = sinf(yaw) * kCharacterScale;
-        simd_float4x4 charModel = matrix_identity_float4x4;
-        charModel.columns[0] = simd_make_float4(c, 0, -s, 0);
-        charModel.columns[1] = simd_make_float4(0, kCharacterScale, 0, 0);
-        charModel.columns[2] = simd_make_float4(s, 0, c, 0);
-        charModel.columns[3] = simd_make_float4(_character.position.x, _character.position.y, _character.position.z, 1.0f);
-        _levelRenderer.characterTransform = charModel;
-        _levelRenderer.hasCharacter = YES;
-    } else {
-        _levelRenderer.hasCharacter = NO;
+        float dt = (_lastUpdateTime > 0) ? (float)(now - _lastUpdateTime) : (1.0f / 60.0f);
+        dt = fminf(dt, 0.05f);   // clamp a paused/backgrounded gap so Santa can't tunnel through the level
+        _lastUpdateTime = now;
+        [_character update:dt physics:_physicsWorld];
+        [_levelRenderer setSantaPosition:_character.position facingAngle:_character.facingAngle];
+        [_levelRenderer setCameraTarget:_character.position];
     }
 
     // Model is normalised to ~1.4 units; pull the camera back until it fits
@@ -731,37 +467,6 @@ static simd_float4x4 RotationY(float a) {
         [e drawPrimitives:MTLPrimitiveTypeTriangle      // 6 vertices per glyph
               vertexStart:0
               vertexCount:_textVertexCount];
-    }
-
-    // Pass 3: main menu overlay (sc.dds banner/title, joymania.dds corner
-    // logo, START GAME/HIGHSCORES/OPTIONS/QUIT labels) — same sprite
-    // pipeline, drawn last so it's always on top while _inMainMenu.
-    if (_inMainMenu && levelMode && _spritePipelineState) {
-        [e setRenderPipelineState:_spritePipelineState];
-        [e setDepthStencilState:_spriteDepthState];
-        [e setCullMode:MTLCullModeNone];
-        if (_scTexture && _scVertexBuffer && _scVertexCount > 0) {
-            [e setVertexBuffer:_scVertexBuffer offset:0 atIndex:0];
-            [e setFragmentTexture:_scTexture atIndex:0];
-            [e setFragmentSamplerState:_fontRenderer.sampler atIndex:0];
-            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_scVertexCount];
-        }
-        if (_joymaniaTexture && _joymaniaVertexBuffer && _joymaniaVertexCount > 0) {
-            [e setVertexBuffer:_joymaniaVertexBuffer offset:0 atIndex:0];
-            [e setFragmentTexture:_joymaniaTexture atIndex:0];
-            [e setFragmentSamplerState:_fontRenderer.sampler atIndex:0];
-            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_joymaniaVertexCount];
-        }
-        if (_fontRenderer.atlasTexture) {
-            [e setFragmentTexture:_fontRenderer.atlasTexture atIndex:0];
-            [e setFragmentSamplerState:_fontRenderer.sampler atIndex:0];
-            for (int i = 0; i < 4; i++) {
-                if (_menuTextVertexBuffer[i] && _menuTextVertexCount[i] > 0) {
-                    [e setVertexBuffer:_menuTextVertexBuffer[i] offset:0 atIndex:0];
-                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_menuTextVertexCount[i]];
-                }
-            }
-        }
     }
 
     [e endEncoding];

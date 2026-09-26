@@ -24,10 +24,6 @@
 // Always a .x model path (".ani" entries are mapped to the matching .x).
 @property (strong, nonatomic) NSString *meshFile;
 @property (strong, nonatomic) NSString *elementType; // e.g. ENEMY, RECTFORM, PLATTFORM, DECO, BONUS, EXIT...
-// RADIUS from the same elements.txt entry (0 if the entry had none) — the
-// original exe's own per-element collision radius field. Used by
-// PhysicsWorld for ground footprint / enemy-collision checks.
-@property (nonatomic) float radius;
 @end
 
 @interface GameEngine : NSObject

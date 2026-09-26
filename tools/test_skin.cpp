@@ -7,6 +7,7 @@
 #include "AssetManager.h"
 #include "XFileParser.h"
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -48,7 +49,7 @@ static void printMat(const char* label, const Mat4& M) {
     for (int i = 0; i < 4; i++) printf("  [%8.4f %8.4f %8.4f %8.4f]\n", M.m[i][0], M.m[i][1], M.m[i][2], M.m[i][3]);
 }
 
-static bool g_fixTrailingWeight = false;
+static int g_fixMode = 0; // 0=none, 1=append 1.0, 2=repeat last weight, 3=repeat first weight
 
 struct SkinWeightsData {
     std::string boneName;
@@ -152,13 +153,11 @@ static void runSkinTest(const std::vector<XToken>& tokens, int order, bool verbo
                 if (rawWeights.size() >= 16) {
                     size_t weightsLen = rawWeights.size() - 16;
                     sw.offsetMatrix = Mat4::fromFloats16(std::vector<float>(rawWeights.end() - 16, rawWeights.end()));
-                    if (g_fixTrailingWeight && weightsLen + 1 == sw.vertexIndices.size()) {
-                        sw.weights.assign(rawWeights.begin(), rawWeights.begin() + weightsLen);
-                        sw.weights.push_back(1.0f); // implicit trailing full-weight vertex
-                    } else {
-                        weightsLen = std::min(weightsLen, sw.vertexIndices.size());
-                        sw.weights.assign(rawWeights.begin(), rawWeights.begin() + weightsLen);
-                    }
+                    weightsLen = std::min(weightsLen, sw.vertexIndices.size());
+                    sw.weights.assign(rawWeights.begin(), rawWeights.begin() + weightsLen);
+                    if (g_fixMode == 1) { while (sw.weights.size() < sw.vertexIndices.size()) sw.weights.push_back(1.0f); }
+                    else if (g_fixMode == 2) { while (sw.weights.size() < sw.vertexIndices.size()) sw.weights.push_back(sw.weights.back()); }
+                    else if (g_fixMode == 3) { while (sw.weights.size() < sw.vertexIndices.size()) sw.weights.push_back(sw.weights.front()); }
                 }
                 if (!sw.boneName.empty() && !sw.vertexIndices.empty() && !sw.weights.empty()) skins.push_back(sw);
                 continue;
@@ -258,6 +257,75 @@ static void dumpTokensNear(const std::vector<XToken>& tokens, const std::string&
     printf("STRING \"%s\" not found\n", needle.c_str());
 }
 
+// Same as XFileParser::parseTokens but also records each token's starting
+// byte offset, so we can print raw hex around a token of interest and check
+// the tokenizer against the actual bytes by hand.
+struct DTok { XToken tok; size_t startOffset; };
+static uint32_t rU32(const uint8_t* d, size_t o) { return d[o]|(d[o+1]<<8)|(d[o+2]<<16)|(d[o+3]<<24); }
+static uint16_t rU16(const uint8_t* d, size_t o) { return d[o]|(d[o+1]<<8); }
+static std::vector<DTok> parseTokensDebug(const uint8_t* data, size_t size, int maxTokens) {
+    std::vector<DTok> tokens;
+    size_t offset = 0; int templateDepth=0, braceDepth=0, skipCount=0;
+    while (offset + 2 <= size && (int)tokens.size() < maxTokens) {
+        size_t tokStart = offset;
+        uint16_t tokenType = rU16(data, offset); offset += 2;
+        if (tokenType > 51) { skipCount++; if (skipCount>1000) break; continue; }
+        skipCount = 0;
+        XToken token; token.type = tokenType; token.intValue=0; token.floatValue=0; token.dwordValue=0; token.wordValue=0;
+        switch (tokenType) {
+            case 1: { if(offset+4>size){offset=size;break;} uint32_t len=rU32(data,offset); offset+=4; if(len>10000||offset+len>size){offset=size;break;} token.name=std::string((const char*)(data+offset),len); offset+=len; break; }
+            case 2: { if(offset+4>size){offset=size;break;} uint32_t len=rU32(data,offset); offset+=4; if(len>10000||offset+len>size){offset=size;break;} token.name=std::string((const char*)(data+offset),len); offset+=len; if(offset+2<=size) offset+=2; break; }
+            case 3: if(offset+4>size){offset=size;break;} token.intValue=(int)rU32(data,offset); offset+=4; break;
+            case 5: if(offset+16>size){offset=size;break;} offset+=16; break;
+            case 6: { if(offset+4>size){offset=size;break;} uint32_t count=rU32(data,offset); offset+=4; if(count>100000){offset=size;break;} for(uint32_t i=0;i<count&&offset+4<=size;i++){token.intList.push_back((int)rU32(data,offset)); offset+=4;} break; }
+            case 7: { if(offset+4>size){offset=size;break;} uint32_t count=rU32(data,offset); offset+=4; if(count>100000){offset=size;break;} for(uint32_t i=0;i<count&&offset+4<=size;i++){uint32_t bits=rU32(data,offset); float f; memcpy(&f,&bits,4); token.floatList.push_back(f); offset+=4;} break; }
+            case 10: braceDepth++; break;
+            case 11: braceDepth--; if(braceDepth<=0){braceDepth=0;templateDepth=0;} break;
+            case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 19: case 20: break;
+            case 31: templateDepth++; break;
+            case 40: if(templateDepth==0){if(offset+2>size){offset=size;break;} token.wordValue=rU16(data,offset); offset+=2;} break;
+            case 41: if(templateDepth==0){if(offset+4>size){offset=size;break;} token.dwordValue=(int)rU32(data,offset); offset+=4;} break;
+            case 42: if(templateDepth==0){if(offset+4>size){offset=size;break;} uint32_t bits=rU32(data,offset); memcpy(&token.floatValue,&bits,4); offset+=4;} break;
+            case 43: if(templateDepth==0){if(offset+8>size){offset=size;break;} offset+=8;} break;
+            case 44: case 45: if(templateDepth==0){if(offset+1>size){offset=size;break;} offset+=1;} break;
+            case 46: if(templateDepth==0){if(offset+2>size){offset=size;break;} offset+=2;} break;
+            case 47: if(templateDepth==0){if(offset+4>size){offset=size;break;} offset+=4;} break;
+            case 48: case 49: case 50: if(templateDepth==0){if(offset+4>size){offset=size;break;} uint32_t len=rU32(data,offset); offset+=4; if(len>10000||offset+len>size){offset=size;break;} offset+=len;} break;
+            case 51: break;
+            default: break;
+        }
+        tokens.push_back({token, tokStart});
+    }
+    return tokens;
+}
+
+static void hexDumpRaw(const std::vector<uint8_t>& data, size_t start, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (i % 16 == 0) printf("\n  %06zx: ", start+i);
+        printf("%02x ", data[start+i]);
+    }
+    printf("\n");
+}
+
+static void rawByteCheck(const std::vector<uint8_t>& decompressed, const std::string& needle) {
+    auto dtoks = parseTokensDebug(decompressed.data(), decompressed.size(), 500000);
+    for (size_t i = 0; i < dtoks.size(); i++) {
+        if (dtoks[i].tok.type == 2 && dtoks[i].tok.name == needle) {
+            printf("=== raw bytes around STRING \"%s\" ===\n", needle.c_str());
+            // print the STRING token itself, then next 2 tokens' raw byte ranges
+            for (size_t k = i; k < std::min(dtoks.size(), i + 4); k++) {
+                size_t s = dtoks[k].startOffset;
+                size_t e = (k + 1 < dtoks.size()) ? dtoks[k+1].startOffset : decompressed.size();
+                printf("\ntoken[%zu] type=%d (%s) bytes[%zu..%zu) len=%zu:", k, dtoks[k].tok.type,
+                       XFileParser::describeToken(dtoks[k].tok).c_str(), s, e, e - s);
+                hexDumpRaw(decompressed, s, std::min(e - s, (size_t)200));
+            }
+            return;
+        }
+    }
+    printf("not found\n");
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) { printf("usage: %s xmas.xpk gfx\\\\weihnachtsman_000.x [order 0-3 | dump BoneName]\n", argv[0]); return 1; }
     AssetManager am;
@@ -272,9 +340,13 @@ int main(int argc, char** argv) {
         dumpTokensNear(tokens, argc > 4 ? argv[4] : "Knochen_Mund3", 25);
         return 0;
     }
+    if (argc > 3 && std::string(argv[3]) == "rawbytes") {
+        rawByteCheck(decompressed, argc > 4 ? argv[4] : "Knochen_Mund3");
+        return 0;
+    }
     int order = argc > 3 ? atoi(argv[3]) : 0;
     bool verbose = argc > 4;
-    g_fixTrailingWeight = (argc > 5 && std::string(argv[5]) == "fixw");
+    g_fixMode = argc > 5 ? atoi(argv[5]) : 0;
     runSkinTest(tokens, order, verbose);
     return 0;
 }
