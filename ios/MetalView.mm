@@ -55,6 +55,7 @@ static simd_float4x4 RotationY(float a) {
     PhysicsWorld *_physicsWorld;
     CharacterController *_character;
     BOOL _controlsEnabled;
+    BOOL _showingGameplayDebugText;
     CFTimeInterval _lastFrameTime;
     UIButton *_btnLeft, *_btnRight, *_btnJump;
 }
@@ -168,10 +169,14 @@ static simd_float4x4 RotationY(float a) {
         _controlsEnabled = NO;
         _lastFrameTime = 0;
 
-        CGFloat bs = 64, margin = 24, bottom = frame.size.height - 64 - margin;
-        _btnLeft = [self makeControlButton:@"◀" frame:CGRectMake(margin, bottom, bs, bs)];
-        _btnRight = [self makeControlButton:@"▶" frame:CGRectMake(margin + bs + 16, bottom, bs, bs)];
-        _btnJump = [self makeControlButton:@"▲" frame:CGRectMake(frame.size.width - bs - margin, bottom, bs, bs)];
+        // Real frames are set in -layoutSubviews (not here): `frame` above is
+        // often CGRectZero at this point (the owning UIViewController's view
+        // isn't in a window yet), so anything positioned from it here would
+        // be placed off-screen and never move — autoresizing only resizes
+        // this view itself, not these subviews' already-fixed frames.
+        _btnLeft = [self makeControlButton:@"◀" frame:CGRectZero];
+        _btnRight = [self makeControlButton:@"▶" frame:CGRectZero];
+        _btnJump = [self makeControlButton:@"▲" frame:CGRectZero];
         [_btnLeft addTarget:self action:@selector(leftDown) forControlEvents:UIControlEventTouchDown];
         [_btnLeft addTarget:self action:@selector(leftUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
         [_btnRight addTarget:self action:@selector(rightDown) forControlEvents:UIControlEventTouchDown];
@@ -185,11 +190,24 @@ static simd_float4x4 RotationY(float a) {
     return self;
 }
 
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    // Real, always-current positions — self.bounds is correct here even on
+    // the very first layout pass, unlike the `frame` initWithFrame: got.
+    CGFloat bs = 64, margin = 24;
+    CGFloat bottom = self.bounds.size.height - bs - margin;
+    _btnLeft.frame = CGRectMake(margin, bottom, bs, bs);
+    _btnRight.frame = CGRectMake(margin + bs + 16, bottom, bs, bs);
+    _btnJump.frame = CGRectMake(self.bounds.size.width - bs - margin, bottom, bs, bs);
+}
+
 - (UIButton *)makeControlButton:(NSString *)title frame:(CGRect)frame {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = frame;
-    b.layer.cornerRadius = frame.size.width * 0.5;
-    b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    b.layer.cornerRadius = 32;
+    b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.28];
+    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.6].CGColor;
+    b.layer.borderWidth = 1.5;
     [b setTitle:title forState:UIControlStateNormal];
     [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont systemFontOfSize:28];
@@ -452,6 +470,7 @@ static simd_float4x4 RotationY(float a) {
                           _character.position.x, _character.position.y, _character.position.z,
                           stateName[_character.state], _character.isOnGround ? @"Y" : @"N"];
         if (![dbg isEqualToString:_displayText]) [self setTextToDisplay:dbg];
+        _showingGameplayDebugText = YES;
 
         // Draw Santa in the level at the character's live position.
         // NOTE (visual estimate, not a verified constant — see LevelRenderer.h
@@ -473,6 +492,14 @@ static simd_float4x4 RotationY(float a) {
         _levelRenderer.hasCharacter = YES;
     } else {
         _levelRenderer.hasCharacter = NO;
+        if (_showingGameplayDebugText) {
+            // Leaving level mode — don't leave stale "Santa (x,y,z) ..." text
+            // on screen over the single-mesh / log views. AppDelegate's own
+            // modeChanged: sets its own text right after this, but this
+            // covers the one-frame gap and any other path that flips showLevel.
+            [self setTextToDisplay:@""];
+            _showingGameplayDebugText = NO;
+        }
     }
 
     // Model is normalised to ~1.4 units; pull the camera back until it fits

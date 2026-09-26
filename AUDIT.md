@@ -199,7 +199,33 @@ subsystem (`"MOS Client: start connecting to %s port:%d"`, `"Connecting to serve
 for over two decades, so even the original Windows build can no longer reach it — this whole
 subsystem is inert today either way. No ARM64/iOS replacement required.
 
-## Known gaps (not done)
+## Session 2026-09-26 (later) — first real device screenshots, button bug found & fixed
+
+Screenshots from an actual build showed Santa correctly standing on a level platform
+(`groundHeightAtX:z:` genuinely works), but the ◀ ▶ ▲ on-screen buttons were completely
+invisible.
+
+**Root cause**: `MetalView`'s buttons were positioned in `initWithFrame:` using the `frame`
+parameter. `AppDelegate.mm` constructs it as `[[MetalView alloc] initWithFrame:vc.view.bounds]`
+on a bare, just-created `UIViewController` that isn't in a window yet — `vc.view.bounds` is
+`CGRectZero` at that point. So every button frame was computed from a zero-size rect (e.g. the
+jump button's `x = frame.size.width - bs - margin = 0 - 64 - 24 = -88`), placing all three
+off-screen. `mv.autoresizingMask` later resizes `mv` itself to fill the window, but autoresizing
+only adjusts the view it's set on — it does nothing for that view's own subviews' already-fixed
+frames, so the buttons stayed stuck off-screen permanently.
+
+**Fix**: moved the frame math into a new `-layoutSubviews` override, which iOS calls automatically
+every time `self.bounds` actually changes (including the first real layout pass once the view is
+in the window) — buttons are created with `CGRectZero` in `initWithFrame:` and positioned from
+`self.bounds.size` (always correct) in `layoutSubviews` instead. Also bumped the button
+background alpha (0.18 → 0.28) and added a subtle border so they're visible against both the
+black sky and the stone platform textures.
+
+## Known gaps (not done)Also fixed a small cosmetic issue while there: the gameplay debug text (`"Santa (x,y,z) ..."`)
+could linger on screen for a frame after switching away from the Level tab — `drawInMTKView:`
+now explicitly clears it the moment `levelMode` goes false.
+
+
 - `.ani` keyframes: 80‑byte records (4×4 matrix, 3 floats ≈ scale, u32 ms time, step 160) recognised, but clip/bone boundaries not decoded → no animation playback yet.
 - `qmeter.jpg` texture referenced by `qmeter.x` does not exist in the archive (falls back to white).
 - Music `m02B.wav` lives outside the XPK; other tracks are not in the provided data.
