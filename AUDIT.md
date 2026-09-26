@@ -221,6 +221,61 @@ in the window) — buttons are created with `CGRectZero` in `initWithFrame:` and
 background alpha (0.18 → 0.28) and added a subtle border so they're visible against both the
 black sky and the stone platform textures.
 
+## Session 2026-09-26 (later still) — real main menu screen, matching the PC title screen
+
+Person shared a screenshot of the original PC build's actual title screen (`SantaClausInTrouble.exe`,
+version 1.1f, Nov 29 2002) plus a table of the GUI-related asset files, and asked for the iOS port's
+menu to look like it ("PC jaisa ho"). Until now the app only had the debug Level/Santa/Log tabs —
+no real menu existed.
+
+**Asset discovery** (measured directly from the real files with PIL, not guessed):
+- `maps\sc.dds` (512×512, ARGB8888) turned out to contain almost the whole top banner in one
+  texture: the "CDV FunLine" wordmark, the "cdv" logo, and the full cursive "Santa Claus in
+  Trouble" title logo, all baked together with a transparent lower half. Alpha-channel bounding
+  box: content is exactly UV `u[0, 0.8945] v[0, 0.5]`.
+- `maps\joymania.dds` (256×256) has the "JD Joymania Development" corner logo in its *top* band
+  and an unrelated small gold Santa-figurine icon lower down in the *same texture* — found the
+  gap row (63–143 empty) separating them and cropped to just the logo band:
+  UV `u[0.0156, 0.9844] v[0.0234, 0.2461]`.
+- `gui2.tga` (128×128) is just golden 9-slice window-frame border pieces + 2 icons — not used for
+  this pass (menu buttons are plain bitmap-font text on the level background, matching how the
+  reference screenshot's menu items look — no button chrome around them there either).
+- No separate title/splash image exists outside `xmas.xpk`, and nothing in the original game
+  folder either (checked `SantaClausInTrouble.exe`'s sibling files) — confirms `sc.dds` really is
+  the complete title graphic, not a partial one.
+
+**What was built** (`MetalView.mm`): a real menu overlay drawn on top of the already-working
+Level view (level 000's background — stone platform, snowy pine trees, night sky — already
+matches the reference screenshot's scene almost exactly, since it's the same renderer):
+- `sc.dds` banner+title and the cropped `joymania.dds` logo, drawn via a new generic
+  screen-space textured-quad builder (`buildSpriteQuadInRect:uv:screenSize:`), reusing the
+  existing `_spritePipelineState` (the same alpha-blended pipeline the debug text already used —
+  no new Metal pipeline needed).
+- START GAME / HIGHSCORES / OPTIONS / QUIT labels, rendered with the real `big_font` bitmap font
+  (`FontRenderer`, same one the debug overlay uses) instead of a system font, for visual fidelity.
+- Invisible `UIButton` hit-targets stacked exactly under each label (same "transparent UIButton
+  over custom-drawn Metal content" pattern already used for the ◀ ▶ ▲ movement controls), so taps
+  land on the real glyphs.
+- `startGameTapped` hides the menu overlay and reveals the ◀ ▶ ▲ movement controls — Santa stands
+  still at his spawn point (matching the reference screenshot) until then. `highscoresTapped` /
+  `optionsTapped` / `quitTapped` are intentionally no-ops for now: there's no highscore storage,
+  settings screen, or (per Apple HIG) app-initiated quit implemented yet — visual-only stubs.
+
+**Honest caveats**:
+- Button *screen positions* (the vertical stack's exact x/y/spacing) are **visually estimated**
+  from the reference screenshot's proportions, not reverse-engineered — those coordinates are
+  almost certainly hard-coded in the exe's compiled code, not in any text asset file, so there's
+  nothing to extract them from short of disassembly (see the exe-forensics section above for why
+  that's impractical here). Tune `computeMenuButtonRects:` by eye against a real device/simulator.
+- Colors: the reference shows START GAME/HIGHSCORES/OPTIONS in a warm off-white and QUIT in
+  orange — `FontRenderer` currently draws whatever color is baked into the `big_font00/01/02.dds`
+  atlas pages with no per-draw tint, so all four labels currently render in the same color. Per-
+  label tinting would need a small fragment-shader/uniform change to `_spritePipelineState` —
+  not done this pass.
+- `gui2.tga`'s 9-slice window-frame graphics aren't used yet (no boxed panel behind the menu,
+  matching how the reference screenshot doesn't obviously show one either around the menu text
+  itself — worth a closer look if a future screenshot shows otherwise).
+
 ## Known gaps (not done)Also fixed a small cosmetic issue while there: the gameplay debug text (`"Santa (x,y,z) ..."`)
 could linger on screen for a frame after switching away from the Level tab — `drawInMTKView:`
 now explicitly clears it the moment `levelMode` goes false.
