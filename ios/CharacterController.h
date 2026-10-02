@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <simd/simd.h>
 
+@class PhysicsWorld;
+
 // ============================================================
 // Character Controller
 //
@@ -21,6 +23,11 @@ typedef NS_ENUM(NSInteger, CharacterState) {
 };
 
 @interface CharacterController : NSObject
+
+// Set once after loading a level (AppDelegate/MetalView owns the
+// PhysicsWorld instance). If nil, falls back to a flat ground at y=0,
+// same as before.
+@property (nonatomic, weak) PhysicsWorld *physicsWorld;
 
 // Transform
 @property (nonatomic) simd_float3 position;

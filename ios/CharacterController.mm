@@ -1,4 +1,5 @@
 #import "CharacterController.h"
+#import "PhysicsWorld.h"
 
 @implementation CharacterController {
     BOOL _inputLeft;
@@ -67,9 +68,11 @@
     // Apply velocity
     _position += _velocity * deltaTime;
     
-    // Ground check (simple — replace with level collision later)
-    if (_position.y <= 0) {
-        _position.y = 0;
+    // Ground check: real per-footprint height from PhysicsWorld when
+    // available (level loaded), otherwise the old flat y=0 behavior.
+    float ground = self.physicsWorld ? [self.physicsWorld groundHeightAtX:_position.x z:_position.z] : 0.0f;
+    if (_position.y <= ground) {
+        _position.y = ground;
         _velocity.y = 0;
         _isOnGround = YES;
         if (_state == CharacterStateJumping || _state == CharacterStateFalling) {
@@ -80,6 +83,12 @@
         if (_state != CharacterStateJumping) {
             _state = CharacterStateFalling;
         }
+    }
+
+    // Hazard collision (enemies): just flags state for now — caller
+    // decides what "Hurt" means (lose a life, knockback, etc).
+    if (self.physicsWorld && [self.physicsWorld checkCollisionAtPosition:_position radius:0.5f]) {
+        _state = CharacterStateHurt;
     }
 }
 
