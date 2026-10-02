@@ -3,8 +3,6 @@
 #import "FontRenderer.h"
 #import "Camera.h"
 #import "LevelRenderer.h"
-#import "PhysicsWorld.h"
-#import "CharacterController.h"
 #import <Metal/Metal.h>
 #import <simd/simd.h>
 
@@ -46,11 +44,6 @@ static simd_float4x4 RotationY(float a) {
 
     FontRenderer *_fontRenderer;
     NSString *_displayText;
-
-    PhysicsWorld *_physicsWorld;
-    CharacterController *_character;
-    BOOL _playMode;
-    CFTimeInterval _lastUpdateTime;   // 0 = "just (re)entered play mode", avoids a huge first dt
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -159,40 +152,7 @@ static simd_float4x4 RotationY(float a) {
 
 // ---------- level view ----------
 - (BOOL)loadLevel:(NSString *)levelPath {
-    BOOL ok = [_levelRenderer loadLevel:levelPath];
-    if (ok) {
-        // (Re)build the collision world from the SAME object list the
-        // renderer just placed on screen, so collision can never disagree
-        // with what's visible. Spawn/reset the character at the level's
-        // start point every time a level (re)loads.
-        if (!_physicsWorld) _physicsWorld = [[PhysicsWorld alloc] init];
-        if (!_character) _character = [[CharacterController alloc] init];
-        [_physicsWorld buildFromLevelObjects:_levelRenderer.objects];
-        _character.position = _levelRenderer.spawnPoint;
-        _character.velocity = simd_make_float3(0, 0, 0);
-        _character.state = CharacterStateIdle;
-        _character.isOnGround = YES;
-        _lastUpdateTime = 0;
-    }
-    return ok;
-}
-
-- (void)setPlayMode:(BOOL)playMode {
-    _playMode = playMode;
-    _lastUpdateTime = 0;   // next update: use a safe default dt, not a huge stale gap
-}
-- (BOOL)playMode { return _playMode; }
-
-- (void)setPlayerMoveX:(float)dx z:(float)dz {
-    [_character setMoveDirectionX:dx z:dz];
-}
-
-- (void)triggerPlayerJump {
-    [_character triggerJump];
-}
-
-- (int)playerLives {
-    return _character ? _character.lives : -1;
+    return [_levelRenderer loadLevel:levelPath];
 }
 
 - (NSString *)levelSummary {
@@ -406,16 +366,6 @@ static simd_float4x4 RotationY(float a) {
 
     _frameCount++;
     _angle += 0.01f;
-
-    if (levelMode && _playMode && _character) {
-        CFTimeInterval now = CACurrentMediaTime();
-        float dt = (_lastUpdateTime > 0) ? (float)(now - _lastUpdateTime) : (1.0f / 60.0f);
-        dt = fminf(dt, 0.05f);   // clamp a paused/backgrounded gap so Santa can't tunnel through the level
-        _lastUpdateTime = now;
-        [_character update:dt physics:_physicsWorld];
-        [_levelRenderer setSantaPosition:_character.position facingAngle:_character.facingAngle];
-        [_levelRenderer setCameraTarget:_character.position];
-    }
 
     // Model is normalised to ~1.4 units; pull the camera back until it fits
     // both horizontally and vertically (landscape or portrait).
